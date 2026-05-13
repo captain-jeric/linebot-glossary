@@ -1,0 +1,16 @@
+{
+  "name": "linetranslate",
+  "version": "1.0.0",
+  "description": "LINE group chat translation bot",
+  "main": "src/index.js",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@google-cloud/translate": "^9.4.1",
+    "@line/bot-sdk": "^11.0.0",
+    "@supabase/supabase-js": "^2.105.4",
+    "express": "^5.2.1"
+  }
+}

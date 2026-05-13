@@ -1,0 +1,22 @@
+#以下都是举例,实际配置时需要删除
+# 依赖库（应该在容器内安装，而不是从本地复制）
+node_modules
+npm-debug.log
+
+# 版本控制
+.git
+.gitignore
+
+# 敏感信息
+.env
+.env.*
+secrets
+
+# 临时文件和构建输出
+dist/
+build/
+.DS_Store
+*.log
+Dockerfile
+docker-compose.yml
+README.md

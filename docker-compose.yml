@@ -1,0 +1,140 @@
+services:
+  line-bot:
+
+    # 使用当前目录 Dockerfile 构建镜像
+    build: .
+
+    # 容器名称
+    container_name: line-bot
+
+    # 自动重启
+    #
+    # unless-stopped:
+    # 除非手动停止，否则异常退出后自动重启
+    #
+    restart: unless-stopped
+
+    # Google Service Account 凭证挂载
+    #
+    # 本地:
+    # ./secrets/service-account.json
+    #
+    # 容器内部:
+    # /secrets/service-account.json
+    #
+    # ro:
+    # 只读挂载，更安全
+    #
+    volumes:
+      - ./secrets:/secrets:ro
+
+    # 环境变量
+    #
+    # Google SDK 会自动读取
+    #
+    # 注意：
+    # 这里的路径必须和 volumes 里的容器内部路径一致
+    #
+    environment:
+      LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET}
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN}
+      BOT_USER_ID: ${BOT_USER_ID:-}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      ADMIN_TAILSCALE_ONLY: ${ADMIN_TAILSCALE_ONLY:-true}
+      PORT: ${PORT:-3001}
+      LOG_FULL_WEBHOOK_BODY: ${LOG_FULL_WEBHOOK_BODY:-false}
+      TRANSLATE_ACCESS_KEY: ${TRANSLATE_ACCESS_KEY:-}
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/service-account.json
+      NODE_ENV: production
+
+    # 暴露端口
+    #
+    # 左边:
+    # Ubuntu主机端口
+    #
+    # 右边:
+    # Docker容器端口
+    #
+    # 如果只有 cloudflared 通过 Docker 网络访问
+    # 这一段可以删除
+    #
+    #ports:
+    #  - "3001:3001"
+
+    # 加入共享网络
+    #
+    # cloudflared 将通过:
+    # http://line-translate-bot:3001
+    #
+    # 访问这个服务
+    #
+    networks:
+      - shared-network
+
+    # 日志限制（非常重要）
+    #
+    # 防止日志无限增长
+    #
+    logging:
+      driver: "json-file"
+
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cloudflared:
+
+    # 使用 Cloudflare 官方 cloudflared 镜像
+    #
+    # 不需要自己构建 Dockerfile
+    # 服务器会自动 docker pull 这个镜像
+    #
+    image: cloudflare/cloudflared:latest
+
+    # 容器名称
+    container_name: cloudflared
+
+    # 自动重启
+    restart: unless-stopped
+
+    # 运行 Cloudflare Tunnel
+    #
+    # token 从 .env 文件读取：
+    # CLOUDFLARED_TUNNEL_TOKEN=你的token
+    #
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TUNNEL_TOKEN}
+
+    # cloudflared 要和 line-bot 在同一个 Docker 网络
+    #
+    # 在 Cloudflare Zero Trust 后台配置 Public Hostname 时：
+    # Service URL 填：
+    # http://line-bot:3001
+    #
+    networks:
+      - shared-network
+
+    # 确保 bot 服务先启动
+    depends_on:
+      - line-bot
+
+    # 日志限制
+    logging:
+      driver: "json-file"
+
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+
+# 使用外部 Docker 网络
+#
+# 必须提前创建:
+#
+# docker network create shared-network
+#
+networks:
+
+  shared-network:
+    external: true
