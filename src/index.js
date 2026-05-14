@@ -5,6 +5,7 @@
 
 const express = require("express");
 const line = require("@line/bot-sdk");
+const crypto = require("crypto");
 const { Translate } = require("@google-cloud/translate").v2;
 const { createClient } = require("@supabase/supabase-js");
 
@@ -13,10 +14,22 @@ const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 const BOT_USER_ID = process.env.BOT_USER_ID || "";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const ADMIN_TAILSCALE_ONLY = process.env.ADMIN_TAILSCALE_ONLY === "true";
+const ADMIN_ALLOWED_EMAILS = new Set(
+  (process.env.ADMIN_ALLOWED_EMAILS || "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+);
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+const SESSION_SECRET = process.env.SESSION_SECRET || ADMIN_TOKEN || "";
 const LOG_FULL_WEBHOOK_BODY = process.env.LOG_FULL_WEBHOOK_BODY === "true";
 const MAX_LINE_TEXT_LENGTH = 4900;
 const CACHE_MAX_SIZE = 200;
 const BILLING_TIME_ZONE = "Asia/Bangkok";
+const ADMIN_SESSION_COOKIE = "linebot_admin_session";
+const ADMIN_OAUTH_STATE_COOKIE = "linebot_admin_oauth_state";
+const ADMIN_SESSION_MAX_AGE_SECONDS = 60 * 60 * 12;
 
 const requiredEnvNames = [
   "LINE_CHANNEL_SECRET",
@@ -346,6 +359,92 @@ function adminTokenFromRequest(req) {
   return req.query.token || req.body?.token || req.get("x-admin-token") || "";
 }
 
+function getCookie(req, name) {
+  const cookies = String(req.get("cookie") || "").split(";");
+
+  for (const cookie of cookies) {
+    const [rawKey, ...rawValue] = cookie.trim().split("=");
+    if (rawKey === name) return decodeURIComponent(rawValue.join("="));
+  }
+
+  return "";
+}
+
+function buildCookie(name, value, maxAgeSeconds) {
+  const parts = [
+    `${name}=${encodeURIComponent(value)}`,
+    "Path=/admin",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+  ];
+
+  if (maxAgeSeconds === 0) {
+    parts.push("Max-Age=0");
+  } else if (maxAgeSeconds) {
+    parts.push(`Max-Age=${maxAgeSeconds}`);
+  }
+
+  return parts.join("; ");
+}
+
+function signValue(value) {
+  if (!SESSION_SECRET) return "";
+  return crypto.createHmac("sha256", SESSION_SECRET).update(value).digest("base64url");
+}
+
+function createSignedCookieValue(payload) {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${encoded}.${signValue(encoded)}`;
+}
+
+function readSignedCookieValue(value) {
+  if (!value || !SESSION_SECRET) return null;
+
+  const [encoded, signature] = value.split(".");
+  if (!encoded || !signature) return null;
+
+  const expected = signValue(encoded);
+  const valid =
+    signature.length === expected.length &&
+    crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+
+  if (!valid) return null;
+
+  try {
+    return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function createAdminSession(email) {
+  return createSignedCookieValue({
+    email: String(email || "").toLowerCase(),
+    exp: Date.now() + ADMIN_SESSION_MAX_AGE_SECONDS * 1000,
+  });
+}
+
+function getAdminSession(req) {
+  const payload = readSignedCookieValue(getCookie(req, ADMIN_SESSION_COOKIE));
+  if (!payload?.email || !payload?.exp || payload.exp < Date.now()) return null;
+  if (!ADMIN_ALLOWED_EMAILS.has(String(payload.email).toLowerCase())) return null;
+  return payload;
+}
+
+function isGoogleAdminConfigured() {
+  return Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && SESSION_SECRET && ADMIN_ALLOWED_EMAILS.size > 0);
+}
+
+function getExternalBaseUrl(req) {
+  const proto = String(req.get("x-forwarded-proto") || req.protocol || "https").split(",")[0];
+  return `${proto}://${req.get("host")}`;
+}
+
+function getGoogleRedirectUri(req) {
+  return `${getExternalBaseUrl(req)}/admin/auth/google/callback`;
+}
+
 function getRemoteAddress(req) {
   return String(req.socket?.remoteAddress || "").replace(/^::ffff:/, "");
 }
@@ -369,11 +468,6 @@ function isLocalOrTailscaleAddress(address) {
 }
 
 function requireAdmin(req, res, next) {
-  if (!ADMIN_TOKEN) {
-    res.status(503).send("Admin page is disabled. Set ADMIN_TOKEN in .env to enable it.");
-    return;
-  }
-
   const remoteAddress = getRemoteAddress(req);
   const requestHost = getRequestHost(req);
   const isPrivateAdminRequest =
@@ -384,12 +478,20 @@ function requireAdmin(req, res, next) {
     return;
   }
 
-  if (adminTokenFromRequest(req) !== ADMIN_TOKEN) {
-    res.status(401).send(renderAdminLogin(req.query.error || ""));
+  const session = getAdminSession(req);
+  if (session) {
+    req.adminEmail = session.email;
+    next();
     return;
   }
 
-  next();
+  if (ADMIN_TOKEN && adminTokenFromRequest(req) === ADMIN_TOKEN) {
+    req.adminEmail = "ADMIN_TOKEN";
+    next();
+    return;
+  }
+
+  res.status(401).send(renderAdminLogin(req.query.error || ""));
 }
 
 function parseNonNegativeInteger(value) {
@@ -457,9 +559,11 @@ function validateCustomerInput(input) {
 }
 
 function buildAdminRedirect(token, message) {
-  const params = new URLSearchParams({ token });
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
   if (message) params.set("message", message);
-  return `/admin?${params.toString()}`;
+  const query = params.toString();
+  return query ? `/admin?${query}` : "/admin";
 }
 
 async function loadAdminData() {
@@ -503,6 +607,9 @@ function summarizeActivations(activations) {
 }
 
 function renderAdminLogin(errorMessage) {
+  const googleConfigured = isGoogleAdminConfigured();
+  const tokenConfigured = Boolean(ADMIN_TOKEN);
+
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -514,25 +621,36 @@ function renderAdminLogin(errorMessage) {
     main { max-width: 420px; margin: 12vh auto; padding: 24px; background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; }
     label { display: block; font-size: 13px; color: #4b5870; margin-bottom: 8px; }
     input { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 15px; }
-    button { margin-top: 14px; padding: 10px 14px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; }
+    button, .button { display: inline-block; margin-top: 14px; padding: 10px 14px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; text-decoration: none; }
+    .secondary { background: #536078; }
     .error { color: #b42318; margin-bottom: 12px; }
+    .meta { color: #536078; font-size: 13px; line-height: 1.5; }
   </style>
 </head>
 <body>
   <main>
     <h1>管理入口</h1>
     ${errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : ""}
-    <form method="get" action="/admin">
-      <label for="token">ADMIN_TOKEN</label>
-      <input id="token" name="token" type="password" autocomplete="current-password" autofocus>
-      <button type="submit">进入</button>
-    </form>
+    ${
+      googleConfigured
+        ? '<p><a class="button" href="/admin/login/google">使用 Google 账号登录</a></p>'
+        : '<p class="meta">Google 登录尚未配置。请设置 GOOGLE_CLIENT_ID、GOOGLE_CLIENT_SECRET、SESSION_SECRET 和 ADMIN_ALLOWED_EMAILS。</p>'
+    }
+    ${
+      tokenConfigured
+        ? `<form method="get" action="/admin">
+            <label for="token">备用 ADMIN_TOKEN</label>
+            <input id="token" name="token" type="password" autocomplete="current-password" ${googleConfigured ? "" : "autofocus"}>
+            <button class="secondary" type="submit">使用备用 token 进入</button>
+          </form>`
+        : ""
+    }
   </main>
 </body>
 </html>`;
 }
 
-function renderAdminPage({ customers, activations, token, message }) {
+function renderAdminPage({ customers, activations, token, message, adminEmail }) {
   const activationSummary = summarizeActivations(activations);
   const activationRows = activations
     .slice(0, 50)
@@ -701,7 +819,7 @@ function renderAdminPage({ customers, activations, token, message }) {
   </style>
 </head>
 <body>
-  <header><h1>LINE 翻译机器人管理</h1></header>
+  <header><h1>LINE 翻译机器人管理</h1><p class="meta">当前管理员：${escapeHtml(adminEmail || "unknown")} · <a href="/admin/logout">退出</a></p></header>
   <main>
     ${message ? `<div class="message">${escapeHtml(message)}</div>` : ""}
     <section class="panel">
@@ -958,6 +1076,93 @@ app.get("/health", (_req, res) => {
 
 app.use("/admin", express.urlencoded({ extended: false }));
 
+app.get("/admin/login/google", (req, res) => {
+  if (!isGoogleAdminConfigured()) {
+    res.redirect(buildAdminRedirect("", "Google 登录尚未配置。"));
+    return;
+  }
+
+  const state = crypto.randomBytes(24).toString("base64url");
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: getGoogleRedirectUri(req),
+    response_type: "code",
+    scope: "openid email profile",
+    state,
+    prompt: "select_account",
+  });
+
+  res.setHeader("Set-Cookie", buildCookie(ADMIN_OAUTH_STATE_COOKIE, state, 600));
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+});
+
+app.get("/admin/auth/google/callback", async (req, res) => {
+  try {
+    if (!isGoogleAdminConfigured()) {
+      res.redirect(buildAdminRedirect("", "Google 登录尚未配置。"));
+      return;
+    }
+
+    const expectedState = getCookie(req, ADMIN_OAUTH_STATE_COOKIE);
+    const actualState = String(req.query.state || "");
+    const code = String(req.query.code || "");
+
+    if (!code || !expectedState || actualState !== expectedState) {
+      res.redirect(buildAdminRedirect("", "Google 登录状态无效，请重新登录。"));
+      return;
+    }
+
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: getGoogleRedirectUri(req),
+        grant_type: "authorization_code",
+      }),
+    });
+
+    const tokenBody = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokenBody.access_token) {
+      console.error("Google OAuth token exchange failed:", tokenBody);
+      res.redirect(buildAdminRedirect("", "Google 登录失败，请查看服务日志。"));
+      return;
+    }
+
+    const userResponse = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+      headers: { authorization: `Bearer ${tokenBody.access_token}` },
+    });
+    const userInfo = await userResponse.json();
+    const email = String(userInfo.email || "").toLowerCase();
+
+    if (!userResponse.ok || userInfo.email_verified !== true || !ADMIN_ALLOWED_EMAILS.has(email)) {
+      console.warn("Google admin login rejected:", {
+        email,
+        emailVerified: userInfo.email_verified,
+        time: new Date().toISOString(),
+      });
+      res.redirect(buildAdminRedirect("", "该 Google 账号不在管理员白名单中。"));
+      return;
+    }
+
+    res.setHeader("Set-Cookie", [
+      buildCookie(ADMIN_SESSION_COOKIE, createAdminSession(email), ADMIN_SESSION_MAX_AGE_SECONDS),
+      buildCookie(ADMIN_OAUTH_STATE_COOKIE, "", 0),
+    ]);
+    res.redirect("/admin");
+  } catch (error) {
+    console.error("Google admin login failed:", error);
+    res.redirect(buildAdminRedirect("", "Google 登录失败，请稍后重试。"));
+  }
+});
+
+app.get("/admin/logout", (_req, res) => {
+  res.setHeader("Set-Cookie", buildCookie(ADMIN_SESSION_COOKIE, "", 0));
+  res.redirect("/admin");
+});
+
 app.get("/admin", requireAdmin, async (req, res) => {
   try {
     const data = await loadAdminData();
@@ -966,6 +1171,7 @@ app.get("/admin", requireAdmin, async (req, res) => {
         ...data,
         token: adminTokenFromRequest(req),
         message: req.query.message || "",
+        adminEmail: req.adminEmail,
       })
     );
   } catch (error) {
