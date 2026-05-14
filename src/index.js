@@ -804,6 +804,7 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
     .wide { grid-column: span 2; }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #4b5870; }
     input, select { box-sizing: border-box; width: 100%; padding: 9px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; background: #fff; }
+    .input-with-button { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
     code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
     button { padding: 9px 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; }
     button.secondary { background: #536078; }
@@ -851,7 +852,12 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <div class="grid">
           <label>客户名称<input name="name" placeholder="客户或公司名称"></label>
-          <label>激活码<input name="activation_code" placeholder="TH-2026-A7K9Q2"></label>
+          <label>激活码
+            <span class="input-with-button">
+              <input id="new-activation-code" name="activation_code" placeholder="LT-2026-K7Q9-X4M2">
+              <button type="button" class="secondary" id="generate-activation-code">生成</button>
+            </span>
+          </label>
           <label>状态
             <select name="status">
               <option value="active">active</option>
@@ -882,6 +888,26 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
       <tbody>${activationRows || '<tr><td colspan="9">暂无绑定记录。</td></tr>'}</tbody>
     </table>
   </main>
+  <script>
+    (() => {
+      const input = document.getElementById("new-activation-code");
+      const button = document.getElementById("generate-activation-code");
+      if (!input || !button) return;
+
+      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      const randomBlock = (length) => {
+        const bytes = new Uint8Array(length);
+        crypto.getRandomValues(bytes);
+        return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+      };
+
+      button.addEventListener("click", () => {
+        input.value = ["LT", new Date().getFullYear(), randomBlock(4), randomBlock(4)].join("-");
+        input.focus();
+        input.select();
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
