@@ -8,11 +8,11 @@ const line = require("@line/bot-sdk");
 const { Translate } = require("@google-cloud/translate").v2;
 const { createClient } = require("@supabase/supabase-js");
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 const BOT_USER_ID = process.env.BOT_USER_ID || "";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
-const ADMIN_TAILSCALE_ONLY = process.env.ADMIN_TAILSCALE_ONLY !== "false";
+const ADMIN_TAILSCALE_ONLY = process.env.ADMIN_TAILSCALE_ONLY === "true";
 const LOG_FULL_WEBHOOK_BODY = process.env.LOG_FULL_WEBHOOK_BODY === "true";
 const MAX_LINE_TEXT_LENGTH = 4900;
 const CACHE_MAX_SIZE = 200;
@@ -21,7 +21,6 @@ const BILLING_TIME_ZONE = "Asia/Bangkok";
 const requiredEnvNames = [
   "LINE_CHANNEL_SECRET",
   "LINE_CHANNEL_ACCESS_TOKEN",
-  "GOOGLE_APPLICATION_CREDENTIALS",
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE_KEY",
 ];
@@ -40,7 +39,31 @@ const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
 });
 
-const translateClient = new Translate();
+function parseJsonEnv(name) {
+  const value = process.env[name];
+  if (!value) return null;
+
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new Error(`${name} is not valid JSON: ${error.message}`);
+  }
+}
+
+function buildTranslateClientOptions() {
+  const credentials =
+    parseJsonEnv("GOOGLE_APPLICATION_CREDENTIALS_JSON") ||
+    parseJsonEnv("GOOGLE_SERVICE_ACCOUNT_JSON");
+
+  if (!credentials) return {};
+
+  return {
+    credentials,
+    projectId: credentials.project_id,
+  };
+}
+
+const translateClient = new Translate(buildTranslateClientOptions());
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
