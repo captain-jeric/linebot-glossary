@@ -35,6 +35,7 @@ create table if not exists public.activations (
   customer_id uuid not null references public.customers(id) on delete restrict,
   conversation_id text not null unique,
   source_type text not null check (source_type in ('group', 'room', 'user')),
+  owner_user_id text,
   enabled boolean not null default true,
   mode text not null default 'bilingual' check (mode in ('bilingual', 'trilingual')),
   from_lang text not null default 'zh',
@@ -44,6 +45,15 @@ create table if not exists public.activations (
   last_active_at timestamptz
 );
 
+alter table public.activations
+  add column if not exists owner_user_id text;
+
+update public.activations
+set owner_user_id = regexp_replace(conversation_id, '^user:', '')
+where source_type = 'user'
+  and owner_user_id is null
+  and conversation_id like 'user:%';
+
 create index if not exists customers_activation_code_idx
   on public.customers (activation_code);
 
@@ -52,6 +62,13 @@ create index if not exists customers_status_expires_at_idx
 
 create index if not exists activations_customer_id_idx
   on public.activations (customer_id);
+
+create index if not exists activations_owner_user_id_idx
+  on public.activations (owner_user_id);
+
+create unique index if not exists activations_one_private_user_per_customer_idx
+  on public.activations (customer_id)
+  where source_type = 'user';
 
 create or replace function public.set_updated_at()
 returns trigger

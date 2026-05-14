@@ -200,6 +200,7 @@ function buildDefaultActivation(conversation) {
   return {
     conversation_id: conversation.id,
     source_type: conversation.sourceType,
+    owner_user_id: null,
     enabled: true,
     mode: "bilingual",
     from_lang: "zh",
@@ -210,6 +211,7 @@ function buildDefaultActivation(conversation) {
 function buildActivationFromTemplate(conversation, template = {}) {
   return {
     ...buildDefaultActivation(conversation),
+    owner_user_id: template.owner_user_id || null,
     enabled: true,
     mode: template.mode || "bilingual",
     from_lang: template.from_lang || "zh",
@@ -572,7 +574,7 @@ async function loadAdminData() {
       supabase.from("customers").select("*").order("created_at", { ascending: false }),
       supabase
         .from("activations")
-        .select("id, customer_id, conversation_id, source_type, enabled, mode, from_lang, to_lang, last_active_at")
+        .select("id, customer_id, conversation_id, source_type, owner_user_id, enabled, mode, from_lang, to_lang, last_active_at")
         .order("last_active_at", { ascending: false, nullsFirst: false }),
     ]);
 
@@ -658,6 +660,7 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
       (activation) => `<tr>
         <td>${escapeHtml(activation.source_type)}</td>
         <td><code>${escapeHtml(activation.conversation_id)}</code></td>
+        <td><code>${escapeHtml(activation.owner_user_id || "-")}</code></td>
         <td>${escapeHtml(activation.mode)}</td>
         <td>${escapeHtml(activation.from_lang)} -> ${escapeHtml(activation.to_lang)}</td>
         <td>${activation.enabled ? "开启" : "关闭"}</td>
@@ -855,8 +858,8 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
 
     <h2>最近绑定聊天环境</h2>
     <table>
-      <thead><tr><th>类型</th><th>Conversation ID</th><th>模式</th><th>语言</th><th>开关</th><th>最后活跃</th></tr></thead>
-      <tbody>${activationRows || '<tr><td colspan="6">暂无绑定记录。</td></tr>'}</tbody>
+      <thead><tr><th>类型</th><th>Conversation ID</th><th>来源用户</th><th>模式</th><th>语言</th><th>开关</th><th>最后活跃</th></tr></thead>
+      <tbody>${activationRows || '<tr><td colspan="7">暂无绑定记录。</td></tr>'}</tbody>
     </table>
   </main>
 </body>
@@ -919,10 +922,77 @@ async function getActivationState(conversationId) {
   return { activation: data, customer: data.customer };
 }
 
+function getOwnerUserIdFromConversation(conversation) {
+  if (conversation?.sourceType !== "user") return null;
+  const match = String(conversation.id || "").match(/^user:(.+)$/);
+  return match ? match[1] : null;
+}
+
+async function getPrivateActivationForCustomer(customerId) {
+  if (!customerId) return null;
+
+  const { data, error } = await supabase
+    .from("activations")
+    .select("*")
+    .eq("customer_id", customerId)
+    .eq("source_type", "user")
+    .order("created_at", { ascending: true })
+    .limit(1);
+
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
+async function switchPrivateActivationCustomer(activation, customerId, ownerUserId) {
+  const oldCustomerId = activation.customer_id;
+  const patch = {
+    customer_id: customerId,
+    owner_user_id: ownerUserId,
+    enabled: true,
+    updated_at: new Date().toISOString(),
+    last_active_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from("activations")
+    .update(patch)
+    .eq("id", activation.id)
+    .select("*, customer:customers(*)")
+    .single();
+
+  if (error) throw error;
+
+  if (oldCustomerId && oldCustomerId !== customerId && ownerUserId) {
+    const { error: migrateError } = await supabase
+      .from("activations")
+      .update({
+        customer_id: customerId,
+        owner_user_id: ownerUserId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("customer_id", oldCustomerId)
+      .or(`owner_user_id.eq.${ownerUserId},owner_user_id.is.null`)
+      .in("source_type", ["group", "room"]);
+
+    if (migrateError) {
+      console.warn("Migrate owned group activations after key switch failed:", {
+        error: migrateError.message,
+        oldCustomerId,
+        newCustomerId: customerId,
+        ownerUserId,
+        time: new Date().toISOString(),
+      });
+    }
+  }
+
+  return { activation: data, customer: data.customer };
+}
+
 async function createActivationState(conversation, customerId, template = {}) {
   const row = {
     ...buildActivationFromTemplate(conversation, template),
     customer_id: customerId,
+    owner_user_id: template.owner_user_id ?? getOwnerUserIdFromConversation(conversation),
     last_active_at: new Date().toISOString(),
   };
 
@@ -941,20 +1011,56 @@ async function getEffectiveActivationState(event, conversation) {
   if (currentState || conversation.sourceType === "user") return currentState;
 
   const userId = event.source?.userId;
-  if (!userId) return null;
+  if (!userId) {
+    console.warn("Cannot inherit private activation without sender userId:", {
+      conversationId: conversation.id,
+      sourceType: conversation.sourceType,
+      time: new Date().toISOString(),
+    });
+    return null;
+  }
 
   const privateState = await getActivationState(`user:${userId}`);
-  if (!privateState) return null;
+  if (!privateState) {
+    console.log("No private activation found for group sender:", {
+      conversationId: conversation.id,
+      sourceType: conversation.sourceType,
+      userId,
+      time: new Date().toISOString(),
+    });
+    return null;
+  }
 
   const customerCheck = isCustomerUsable(privateState.customer);
-  if (!customerCheck.ok) return null;
+  if (!customerCheck.ok) {
+    console.warn("Private activation cannot be inherited because customer is not usable:", {
+      conversationId: conversation.id,
+      sourceType: conversation.sourceType,
+      userId,
+      customerId: privateState.customer?.id,
+      reason: customerCheck.reason,
+      time: new Date().toISOString(),
+    });
+    return null;
+  }
 
   try {
-    return await createActivationState(
+    const inheritedState = await createActivationState(
       conversation,
       privateState.customer.id,
-      privateState.activation
+      {
+        ...privateState.activation,
+        owner_user_id: privateState.activation.owner_user_id || userId,
+      }
     );
+    console.log("Inherited private activation for conversation:", {
+      conversationId: conversation.id,
+      sourceType: conversation.sourceType,
+      userId,
+      customerId: privateState.customer.id,
+      time: new Date().toISOString(),
+    });
+    return inheritedState;
   } catch (error) {
     const duplicateConversation =
       error?.code === "23505" || /duplicate key|unique/i.test(error?.message || "");
@@ -1375,6 +1481,7 @@ async function handleEvent(event) {
   if (!conversation.id) return null;
 
   const lower = text.toLowerCase();
+  const targetCommand = parseTargetLangCommand(text);
 
   if (isActivateCommand(text)) {
     return handleActivateCommand(event, text, conversation);
@@ -1387,22 +1494,24 @@ async function handleEvent(event) {
   }
 
   if (isUsageCommand(lower)) {
-    if (!state) return reply(event, buildNeedActivationText());
+    if (!state) return reply(event, buildNeedActivationText(conversation));
     return reply(event, buildUsageText(state.customer));
   }
 
   if (isSetCommand(lower)) {
-    if (!state) return reply(event, buildNeedActivationText());
+    if (!state) return reply(event, buildNeedActivationText(conversation));
     return handleSetCommand(event, lower, conversation, state.activation);
   }
 
-  if (!state) return null;
+  if (!state) {
+    if (targetCommand) return reply(event, buildNeedActivationText(conversation));
+    return null;
+  }
 
   const customerCheck = isCustomerUsable(state.customer);
   if (!customerCheck.ok || !state.activation.enabled) return null;
   if (text.startsWith("!") || text.startsWith("//")) return null;
 
-  const targetCommand = parseTargetLangCommand(text);
   if (targetCommand && !targetCommand.text) return reply(event, `请输入要翻译的内容，例如：/${targetCommand.targetLang.toUpperCase()} 你好`);
 
   const textToTranslate = targetCommand?.text || text;
@@ -1479,17 +1588,62 @@ async function handleActivateCommand(event, text, conversation) {
     return reply(event, buildActivationRejectedText(customerCheck.reason, customer));
   }
 
+  const ownerUserId = event.source?.userId || getOwnerUserIdFromConversation(conversation);
+  let customerPrivateActivation = null;
+
+  try {
+    customerPrivateActivation = await getPrivateActivationForCustomer(customer.id);
+  } catch (activationError) {
+    console.error("Check customer private activation failed:", {
+      error: activationError.message,
+      conversationId: conversation.id,
+      customerId: customer.id,
+      time: new Date().toISOString(),
+    });
+    return reply(event, "系统暂时无法激活，请稍后再试或联系管理员。");
+  }
+
+  if (
+    customerPrivateActivation &&
+    customerPrivateActivation.conversation_id !== conversation.id
+  ) {
+    return reply(event, "该激活码已绑定其他用户，请联系管理员处理。");
+  }
+
   const existing = await getActivationState(conversation.id);
   if (existing?.activation?.customer_id === customer.id) {
     return reply(event, "当前聊天环境已经激活，无需重复激活。");
   }
 
   if (existing?.activation?.customer_id && existing.activation.customer_id !== customer.id) {
-    return reply(event, "当前聊天环境已绑定其他激活码，请联系管理员处理。");
+    try {
+      await switchPrivateActivationCustomer(existing.activation, customer.id, ownerUserId);
+    } catch (switchError) {
+      console.error("Switch private activation failed:", {
+        error: switchError.message,
+        conversationId: conversation.id,
+        oldCustomerId: existing.activation.customer_id,
+        newCustomerId: customer.id,
+        time: new Date().toISOString(),
+      });
+      return reply(event, "切换激活码失败，请稍后再试或联系管理员。");
+    }
+
+    return reply(
+      event,
+      [
+        "激活码已切换，翻译继续开启。",
+        "你通过私聊带入的群聊或多人聊天室会继续使用新的激活码。",
+        `范围：${conversation.label}`,
+        `模式：${getLangName("zh")} ↔ ${getLangName("th")}`,
+        `剩余额度：${formatNumber(getRemainingChars(customer))} 字符`,
+        `到期时间：${formatDate(customer.expires_at)}`,
+      ].join("\n")
+    );
   }
 
   try {
-    await createActivationState(conversation, customer.id);
+    await createActivationState(conversation, customer.id, { owner_user_id: ownerUserId });
   } catch (insertError) {
     console.error("Create activation failed:", {
       error: insertError.message,
@@ -1678,7 +1832,7 @@ function buildStatusText(conversation, state) {
   if (!state) {
     lines.push("激活：未激活");
     lines.push("");
-    lines.push("请先私聊机器人输入：activate 激活码");
+    lines.push(buildNeedActivationText(conversation));
     return lines.join("\n");
   }
 
@@ -1724,7 +1878,15 @@ function buildUsageText(customer) {
   ].join("\n");
 }
 
-function buildNeedActivationText() {
+function buildNeedActivationText(conversation = null) {
+  if (conversation?.sourceType === "group" || conversation?.sourceType === "room") {
+    return [
+      "当前群聊尚未绑定激活码。",
+      "如果你已经私聊机器人激活，请用同一个 LINE 账号在这个群里发送 /status 或任意一句话，机器人会自动绑定本群。",
+      "不要在群里发送激活码。",
+    ].join("\n");
+  }
+
   return "当前聊天环境尚未激活。为了保护激活码，请先私聊机器人输入：activate 激活码。";
 }
 
