@@ -26,6 +26,8 @@ const SESSION_SECRET = process.env.SESSION_SECRET || ADMIN_TOKEN || "";
 const LOG_FULL_WEBHOOK_BODY = process.env.LOG_FULL_WEBHOOK_BODY === "true";
 const MAX_LINE_TEXT_LENGTH = 4900;
 const CACHE_MAX_SIZE = 200;
+const GROUP_SUMMARY_CACHE_TTL_MS = 1000 * 60 * 60 * 6;
+const GROUP_SUMMARY_NEGATIVE_CACHE_TTL_MS = 1000 * 60 * 5;
 const BILLING_TIME_ZONE = "Asia/Bangkok";
 const ADMIN_SESSION_COOKIE = "linebot_admin_session";
 const ADMIN_OAUTH_STATE_COOKIE = "linebot_admin_oauth_state";
@@ -148,6 +150,7 @@ const TARGET_LANG_COMMANDS = {
 };
 
 const translationCache = new Map();
+const groupSummaryCache = new Map();
 
 function normalizeCode(code) {
   if (!code) return "und";
@@ -568,6 +571,79 @@ function buildAdminRedirect(token, message) {
   return query ? `/admin?${query}` : "/admin";
 }
 
+function parseGroupId(conversationId) {
+  const match = String(conversationId || "").match(/^group:(.+)$/);
+  return match ? match[1] : "";
+}
+
+async function getGroupSummary(groupId) {
+  if (!groupId) return null;
+
+  const cached = groupSummaryCache.get(groupId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  try {
+    const response = await fetch(
+      `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/summary`,
+      {
+        headers: {
+          authorization: `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn("Get LINE group summary failed:", {
+        groupId,
+        status: response.status,
+        time: new Date().toISOString(),
+      });
+      groupSummaryCache.set(groupId, {
+        value: null,
+        expiresAt: Date.now() + GROUP_SUMMARY_NEGATIVE_CACHE_TTL_MS,
+      });
+      return null;
+    }
+
+    const data = await response.json();
+    const summary = {
+      groupName: data.groupName || "",
+      pictureUrl: data.pictureUrl || "",
+    };
+    groupSummaryCache.set(groupId, {
+      value: summary,
+      expiresAt: Date.now() + GROUP_SUMMARY_CACHE_TTL_MS,
+    });
+    return summary;
+  } catch (error) {
+    console.warn("Get LINE group summary error:", {
+      groupId,
+      error: error.message,
+      time: new Date().toISOString(),
+    });
+    groupSummaryCache.set(groupId, {
+      value: null,
+      expiresAt: Date.now() + GROUP_SUMMARY_NEGATIVE_CACHE_TTL_MS,
+    });
+    return null;
+  }
+}
+
+async function enrichActivationDisplayNames(activations) {
+  const visibleActivations = (activations || []).slice(0, 50);
+  await Promise.all(
+    visibleActivations.map(async (activation) => {
+      if (activation.source_type !== "group") return;
+      const groupId = parseGroupId(activation.conversation_id);
+      const summary = await getGroupSummary(groupId);
+      if (summary?.groupName) {
+        activation.display_name = summary.groupName;
+        activation.picture_url = summary.pictureUrl;
+      }
+    })
+  );
+}
+
 async function loadAdminData() {
   const [{ data: customers, error: customersError }, { data: activations, error: activationsError }] =
     await Promise.all([
@@ -582,6 +658,8 @@ async function loadAdminData() {
 
   if (customersError) throw customersError;
   if (activationsError) throw activationsError;
+
+  await enrichActivationDisplayNames(activations || []);
 
   return {
     customers: customers || [],
@@ -665,7 +743,10 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
           <code>${escapeHtml(activation.customer?.activation_code || activation.customer_id)}</code>
         </td>
         <td>${escapeHtml(activation.source_type)}</td>
-        <td><code>${escapeHtml(activation.conversation_id)}</code></td>
+        <td>
+          ${activation.display_name ? `<strong>${escapeHtml(activation.display_name)}</strong><br>` : ""}
+          <code>${escapeHtml(activation.conversation_id)}</code>
+        </td>
         <td><code>${escapeHtml(activation.owner_user_id || "-")}</code></td>
         <td>${escapeHtml(activation.mode)}</td>
         <td>${escapeHtml(activation.from_lang)} -> ${escapeHtml(activation.to_lang)}</td>
