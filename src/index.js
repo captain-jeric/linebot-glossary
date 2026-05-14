@@ -574,7 +574,9 @@ async function loadAdminData() {
       supabase.from("customers").select("*").order("created_at", { ascending: false }),
       supabase
         .from("activations")
-        .select("id, customer_id, conversation_id, source_type, owner_user_id, enabled, mode, from_lang, to_lang, last_active_at")
+        .select(
+          "id, customer_id, conversation_id, source_type, owner_user_id, enabled, mode, from_lang, to_lang, last_active_at, customer:customers(name, activation_code)"
+        )
         .order("last_active_at", { ascending: false, nullsFirst: false }),
     ]);
 
@@ -658,6 +660,10 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
     .slice(0, 50)
     .map(
       (activation) => `<tr>
+        <td>
+          <strong>${escapeHtml(activation.customer?.name || "-")}</strong><br>
+          <code>${escapeHtml(activation.customer?.activation_code || activation.customer_id)}</code>
+        </td>
         <td>${escapeHtml(activation.source_type)}</td>
         <td><code>${escapeHtml(activation.conversation_id)}</code></td>
         <td><code>${escapeHtml(activation.owner_user_id || "-")}</code></td>
@@ -665,6 +671,17 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
         <td>${escapeHtml(activation.from_lang)} -> ${escapeHtml(activation.to_lang)}</td>
         <td>${activation.enabled ? "开启" : "关闭"}</td>
         <td>${escapeHtml(formatDate(activation.last_active_at))}</td>
+        <td class="row-actions">
+          <form method="post" action="/admin/activations/${escapeHtml(activation.id)}/toggle">
+            <input type="hidden" name="token" value="${escapeHtml(token)}">
+            <input type="hidden" name="enabled" value="${activation.enabled ? "false" : "true"}">
+            <button type="submit" class="secondary">${activation.enabled ? "关闭" : "开启"}</button>
+          </form>
+          <form method="post" action="/admin/activations/${escapeHtml(activation.id)}/delete" onsubmit="return confirm('确定解绑这条记录吗？');">
+            <input type="hidden" name="token" value="${escapeHtml(token)}">
+            <button type="submit" class="danger">解绑</button>
+          </form>
+        </td>
       </tr>`
     )
     .join("");
@@ -790,6 +807,7 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
     code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
     button { padding: 9px 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; }
     button.secondary { background: #536078; }
+    button.danger { background: #c2410c; }
     summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; cursor: pointer; }
     summary::-webkit-details-marker { display: none; }
     .summary-main, .summary-stats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -812,6 +830,8 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
     table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; overflow: hidden; }
     th, td { text-align: left; padding: 10px; border-bottom: 1px solid #e8edf3; font-size: 13px; vertical-align: top; }
     th { background: #f8fafc; color: #4b5870; }
+    .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .row-actions form { display: inline-flex; }
     @media (max-width: 860px) {
       .grid, .quota-strip { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
@@ -858,8 +878,8 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
 
     <h2>最近绑定聊天环境</h2>
     <table>
-      <thead><tr><th>类型</th><th>Conversation ID</th><th>来源用户</th><th>模式</th><th>语言</th><th>开关</th><th>最后活跃</th></tr></thead>
-      <tbody>${activationRows || '<tr><td colspan="7">暂无绑定记录。</td></tr>'}</tbody>
+      <thead><tr><th>客户</th><th>类型</th><th>Conversation ID</th><th>来源用户</th><th>模式</th><th>语言</th><th>开关</th><th>最后活跃</th><th>操作</th></tr></thead>
+      <tbody>${activationRows || '<tr><td colspan="9">暂无绑定记录。</td></tr>'}</tbody>
     </table>
   </main>
 </body>
@@ -1026,6 +1046,17 @@ async function getEffectiveActivationState(event, conversation) {
       conversationId: conversation.id,
       sourceType: conversation.sourceType,
       userId,
+      time: new Date().toISOString(),
+    });
+    return null;
+  }
+
+  if (!privateState.activation.enabled) {
+    console.warn("Private activation cannot be inherited because it is disabled:", {
+      conversationId: conversation.id,
+      sourceType: conversation.sourceType,
+      userId,
+      activationId: privateState.activation.id,
       time: new Date().toISOString(),
     });
     return null;
@@ -1406,6 +1437,40 @@ app.post("/admin/customers/:id/reset-monthly", requireAdmin, async (req, res) =>
   }
 
   res.redirect(buildAdminRedirect(token, "本月已用额度已重置。"));
+});
+
+app.post("/admin/activations/:id/toggle", requireAdmin, async (req, res) => {
+  const token = adminTokenFromRequest(req);
+  const enabled = String(req.body.enabled || "") === "true";
+
+  const { error } = await supabase
+    .from("activations")
+    .update({
+      enabled,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", req.params.id);
+
+  if (error) {
+    console.error("Toggle activation failed:", error);
+    res.redirect(buildAdminRedirect(token, `绑定开关失败：${error.message}`));
+    return;
+  }
+
+  res.redirect(buildAdminRedirect(token, enabled ? "绑定已开启。" : "绑定已关闭。"));
+});
+
+app.post("/admin/activations/:id/delete", requireAdmin, async (req, res) => {
+  const token = adminTokenFromRequest(req);
+  const { error } = await supabase.from("activations").delete().eq("id", req.params.id);
+
+  if (error) {
+    console.error("Delete activation failed:", error);
+    res.redirect(buildAdminRedirect(token, `解绑失败：${error.message}`));
+    return;
+  }
+
+  res.redirect(buildAdminRedirect(token, "绑定记录已解绑。"));
 });
 
 app.post("/webhook", line.middleware(middlewareConfig), async (req, res) => {
