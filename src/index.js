@@ -966,16 +966,26 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }
         renewUser
           ? `<div class="renew-user">
               <div class="renew-split">
-                <div class="metric-grid renew-metrics">
-                  ${renderReadonlyMetric("用户名", renewUser.name)}
-                  ${renderReadonlyMetric("USERID", renewUser.line_user_id)}
-                  ${renderReadonlyMetric("状态", userStatus)}
-                  ${renderReadonlyMetric("有效期至", formatDate(renewUser.expires_at))}
-                  ${renderReadonlyMetric("总购买字符", `${formatNumber(quotaChars)} 字符`)}
-                  ${renderReadonlyMetric("已用字符", `${formatNumber(usedChars)} 字符`)}
-                  ${renderReadonlyMetric("剩余字符", `${formatNumber(remainingChars)} 字符`)}
-                  ${renderReadonlyMetric("充值后有效期", `${nextExpiry}`)}
-                  ${renderReadonlyMetric("最近使用", formatDate(renewUser.last_active_at))}
+                <div class="renew-metrics">
+                  <div class="renew-metric-row single">
+                    ${renderReadonlyMetric("USERID", renewUser.line_user_id)}
+                  </div>
+                  <div class="renew-metric-row">
+                    ${renderReadonlyMetric("用户名", renewUser.name)}
+                    ${renderReadonlyMetric("状态", userStatus)}
+                  </div>
+                  <div class="renew-metric-row">
+                    ${renderReadonlyMetric("总购买字符", `${formatNumber(quotaChars)} 字符`)}
+                    ${renderReadonlyMetric("剩余字符", `${formatNumber(remainingChars)} 字符`)}
+                  </div>
+                  <div class="renew-metric-row">
+                    ${renderReadonlyMetric("已用字符", `${formatNumber(usedChars)} 字符`)}
+                    ${renderReadonlyMetric("有效期至", formatDate(renewUser.expires_at))}
+                  </div>
+                  <div class="renew-metric-row">
+                    ${renderReadonlyMetric("最近使用", formatDate(renewUser.last_active_at))}
+                    ${renderReadonlyMetric("充值后有效期", `${nextExpiry}`)}
+                  </div>
                 </div>
 
                 <div class="renew-actions">
@@ -990,7 +1000,7 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }
                       <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
                     </div>
                     <p class="meta">每次充值都会把有效期重新计算为充值当天起 1 年。</p>
-                    <div class="form-actions">
+                    <div class="form-actions recharge-actions">
                       <button type="submit">提交充值</button>
                     </div>
                   </form>
@@ -1051,22 +1061,26 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .metric span { color: #172033; font-size: 14px; margin-top: 3px; overflow-wrap: anywhere; }
     .renew-user { border-top: 1px solid #e8edf3; margin-top: 14px; padding-top: 14px; }
     .renew-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
-    .renew-metrics { grid-template-columns: repeat(2, minmax(150px, 1fr)); margin-top: 0; }
+    .renew-metrics { display: grid; gap: 10px; }
+    .renew-metric-row { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 10px; }
+    .renew-metric-row.single { grid-template-columns: 1fr; }
+    .renew-metrics .metric { margin: 0; }
     .renew-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
-    .renew-card { border: 1px solid #e8edf3; border-radius: 8px; padding: 14px; background: #fbfcfe; }
+    .renew-card { min-height: 230px; border: 1px solid #e8edf3; border-radius: 8px; padding: 14px; background: #fbfcfe; }
     .renew-card h3 { margin: 0 0 12px; font-size: 16px; }
     .list-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 24px; flex-wrap: wrap; }
     .list-toolbar h2 { margin: 0; }
     .limit-form { display: flex; align-items: end; gap: 10px; }
     .limit-form label { width: 130px; }
     .form-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
+    .recharge-actions { justify-content: flex-end; margin-top: 24px; }
     .check { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; min-height: 38px; color: #4b5870; }
     .check input { width: 16px; }
     .meta { color: #536078; font-size: 13px; margin: 10px 0 0; }
     .message { background: #ecfdf3; border: 1px solid #abefc6; color: #067647; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
     .message.error { background: #fff1f0; border-color: #ffccc7; color: #a8071a; margin-top: 14px; }
     @media (max-width: 860px) {
-      .grid, .create-grid, .renew-grid, .renew-grid.compact, .lookup-form, .metric-grid, .renew-metrics, .renew-actions, .renew-split, .inline-row, .create-actions { grid-template-columns: 1fr; }
+      .grid, .create-grid, .renew-grid, .renew-grid.compact, .lookup-form, .metric-grid, .renew-metric-row, .renew-actions, .renew-split, .inline-row, .create-actions { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
       .list-toolbar { align-items: stretch; flex-direction: column; }
       .limit-form { align-items: stretch; }
