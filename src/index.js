@@ -564,7 +564,7 @@ function requireAdmin(req, res, next) {
   res.status(401).send(renderAdminLogin(req.query.error || ""));
 }
 
-function normalizeUserInput(body) {
+function normalizeUserInput(body, existing = {}) {
   return {
     line_user_id: String(body.line_user_id || "").trim(),
     name: String(body.name || "").trim(),
@@ -572,10 +572,22 @@ function normalizeUserInput(body) {
     mode: String(body.mode || "bilingual").trim(),
     from_lang: normalizeCode(body.from_lang || "zh"),
     to_lang: normalizeCode(body.to_lang || "th"),
-    monthly_quota_chars: parseNonNegativeInteger(body.monthly_quota_chars),
-    monthly_used_chars: parseNonNegativeInteger(body.monthly_used_chars),
-    extra_quota_chars: parseNonNegativeInteger(body.extra_quota_chars),
-    extra_used_chars: parseNonNegativeInteger(body.extra_used_chars),
+    monthly_quota_chars:
+      body.monthly_quota_chars === undefined
+        ? parseNonNegativeInteger(existing.monthly_quota_chars)
+        : parseNonNegativeInteger(body.monthly_quota_chars),
+    monthly_used_chars:
+      body.monthly_used_chars === undefined
+        ? parseNonNegativeInteger(existing.monthly_used_chars)
+        : parseNonNegativeInteger(body.monthly_used_chars),
+    extra_quota_chars:
+      body.extra_quota_chars === undefined
+        ? parseNonNegativeInteger(existing.extra_quota_chars)
+        : parseNonNegativeInteger(body.extra_quota_chars),
+    extra_used_chars:
+      body.extra_used_chars === undefined
+        ? parseNonNegativeInteger(existing.extra_used_chars)
+        : parseNonNegativeInteger(body.extra_used_chars),
     billing_period: getCurrentBillingPeriod(),
     expires_at: normalizeExpiryDate(body.expires_at || defaultExpiryDate()),
     notes: String(body.notes || "").trim() || null,
@@ -607,32 +619,77 @@ function buildAdminRedirect(token, message) {
   return query ? `/admin?${query}` : "/admin";
 }
 
-async function loadAdminData() {
+function buildAdminRedirectWithRenewUser(token, message, lineUserId) {
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (message) params.set("message", message);
+  if (lineUserId) params.set("renew_userid", lineUserId);
+  const query = params.toString();
+  return query ? `/admin?${query}` : "/admin";
+}
+
+async function loadAdminData(renewUserId = "") {
   const now = new Date().toISOString();
+  const trimmedRenewUserId = String(renewUserId || "").trim();
+  const queries = [
+    supabase
+      .from("users")
+      .select("*")
+      .eq("status", "active")
+      .gte("expires_at", now)
+      .order("expires_at", { ascending: true })
+      .limit(20),
+    supabase
+      .from("users")
+      .select("*")
+      .or(`expires_at.lt.${now},status.eq.paused`)
+      .order("expires_at", { ascending: false })
+      .limit(20),
+  ];
+
+  if (trimmedRenewUserId) {
+    queries.push(
+      supabase
+        .from("users")
+        .select("*")
+        .eq("line_user_id", trimmedRenewUserId)
+        .maybeSingle()
+    );
+  }
+
+  const results = await Promise.all(queries);
   const [{ data: activeUsers, error: activeError }, { data: expiredUsers, error: expiredError }] =
-    await Promise.all([
-      supabase
-        .from("users")
-        .select("*")
-        .eq("status", "active")
-        .gte("expires_at", now)
-        .order("expires_at", { ascending: true })
-        .limit(20),
-      supabase
-        .from("users")
-        .select("*")
-        .or(`expires_at.lt.${now},status.eq.paused`)
-        .order("expires_at", { ascending: false })
-        .limit(20),
-    ]);
+    results;
+  const renewResult = results[2];
 
   if (activeError) throw activeError;
   if (expiredError) throw expiredError;
+  if (renewResult?.error) throw renewResult.error;
 
   return {
     activeUsers: activeUsers || [],
     expiredUsers: expiredUsers || [],
+    renewUser: renewResult?.data || null,
+    renewUserId: trimmedRenewUserId,
+    renewUserNotFound: Boolean(trimmedRenewUserId && !renewResult?.data),
   };
+}
+
+function renderQuotaOptions(selectedValue = 100000) {
+  const selected = Number(selectedValue || 0);
+  const options = [];
+
+  for (let value = 100000; value <= 1000000; value += 100000) {
+    options.push(
+      `<option value="${value}" ${selected === value ? "selected" : ""}>${formatNumber(value)} 字符</option>`
+    );
+  }
+
+  return options.join("");
+}
+
+function renderReadonlyMetric(label, value) {
+  return `<div class="metric"><b>${escapeHtml(label)}</b><span>${escapeHtml(value)}</span></div>`;
 }
 
 function renderAdminLogin(errorMessage) {
@@ -731,10 +788,10 @@ function renderUserRows(users, token) {
               <label>到期日期<input name="expires_at" type="date" value="${escapeHtml(formatDateInput(user.expires_at))}"></label>
               <label>源语言<input name="from_lang" value="${escapeHtml(user.from_lang || "zh")}"></label>
               <label>目标语言<input name="to_lang" value="${escapeHtml(user.to_lang || "th")}"></label>
-              <label>月度额度<input name="monthly_quota_chars" type="number" min="0" step="1" value="${escapeHtml(user.monthly_quota_chars)}"></label>
-              <label>月度已用<input name="monthly_used_chars" type="number" min="0" step="1" value="${escapeHtml(monthlyUsed)}"></label>
-              <label>加油包额度<input name="extra_quota_chars" type="number" min="0" step="1" value="${escapeHtml(user.extra_quota_chars || 0)}"></label>
-              <label>加油包已用<input name="extra_used_chars" type="number" min="0" step="1" value="${escapeHtml(user.extra_used_chars || 0)}"></label>
+              ${renderReadonlyMetric("月度额度", `${formatNumber(user.monthly_quota_chars)} 字符`)}
+              ${renderReadonlyMetric("月度已用", `${formatNumber(monthlyUsed)} 字符`)}
+              ${renderReadonlyMetric("加油包额度", `${formatNumber(user.extra_quota_chars || 0)} 字符`)}
+              ${renderReadonlyMetric("加油包已用", `${formatNumber(user.extra_used_chars || 0)} 字符`)}
               <label class="wide">备注<input name="notes" value="${escapeHtml(user.notes || "")}"></label>
             </div>
             <p><button type="submit">保存用户</button></p>
@@ -745,7 +802,97 @@ function renderUserRows(users, token) {
     .join("");
 }
 
-function renderAdminPage({ activeUsers, expiredUsers, token, message, adminEmail }) {
+function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }) {
+  const monthlyUsed = getEffectiveMonthlyUsedChars(renewUser);
+  const monthlyRemaining = renewUser && !isUserExpired(renewUser) ? getMonthlyRemainingChars(renewUser) : 0;
+  const extraRemaining = renewUser && !isUserExpired(renewUser) ? getExtraRemainingChars(renewUser) : 0;
+  const totalRemaining = renewUser ? getRemainingChars(renewUser) : 0;
+  const userStatus = renewUser
+    ? isUserExpired(renewUser)
+      ? "已过期"
+      : renewUser.status
+    : "";
+
+  return `<section class="panel">
+      <h2>续费模块</h2>
+      <form method="get" action="/admin" class="lookup-form">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <label>USERID<input name="renew_userid" value="${escapeHtml(renewUserId || "")}" placeholder="输入 USERID 后检索" required></label>
+        <button type="submit">检索</button>
+      </form>
+
+      ${
+        renewUserNotFound
+          ? `<p class="message error">找不到该 USERID：${escapeHtml(renewUserId)}</p>`
+          : ""
+      }
+
+      ${
+        renewUser
+          ? `<div class="renew-user">
+              <div class="metric-grid">
+                ${renderReadonlyMetric("用户名", renewUser.name)}
+                ${renderReadonlyMetric("USERID", renewUser.line_user_id)}
+                ${renderReadonlyMetric("状态", userStatus)}
+                ${renderReadonlyMetric("到期日期", formatDate(renewUser.expires_at))}
+                ${renderReadonlyMetric("月度额度", `${formatNumber(renewUser.monthly_quota_chars)} 字符`)}
+                ${renderReadonlyMetric("月度已用", `${formatNumber(monthlyUsed)} 字符`)}
+                ${renderReadonlyMetric("月度剩余", `${formatNumber(monthlyRemaining)} 字符`)}
+                ${renderReadonlyMetric("加油包额度", `${formatNumber(renewUser.extra_quota_chars || 0)} 字符`)}
+                ${renderReadonlyMetric("加油包已用", `${formatNumber(renewUser.extra_used_chars || 0)} 字符`)}
+                ${renderReadonlyMetric("加油包剩余", `${formatNumber(extraRemaining)} 字符`)}
+                ${renderReadonlyMetric("总剩余", `${formatNumber(totalRemaining)} 字符`)}
+                ${renderReadonlyMetric("最近使用", formatDate(renewUser.last_active_at))}
+              </div>
+
+              <div class="renew-actions">
+                <form method="post" action="/admin/users/${escapeHtml(renewUser.id)}/renew-monthly" class="renew-card">
+                  <input type="hidden" name="token" value="${escapeHtml(token)}">
+                  <input type="hidden" name="line_user_id" value="${escapeHtml(renewUser.line_user_id)}">
+                  <h3>月度续费</h3>
+                  <div class="renew-grid compact">
+                    <label>续费月数
+                      <select name="months">
+                        <option value="1">1 个月</option>
+                        <option value="3">3 个月</option>
+                        <option value="6">6 个月</option>
+                        <option value="12">12 个月</option>
+                      </select>
+                    </label>
+                    <label>月度额度
+                      <select name="monthly_quota_chars">${renderQuotaOptions(renewUser.monthly_quota_chars || 100000)}</select>
+                    </label>
+                    <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
+                  </div>
+                  <div class="form-actions">
+                    <label class="check"><input name="reset_monthly_used" type="checkbox" checked> 清零月度已用</label>
+                    <button type="submit">提交月度续费</button>
+                  </div>
+                </form>
+
+                <form method="post" action="/admin/users/${escapeHtml(renewUser.id)}/topup" class="renew-card">
+                  <input type="hidden" name="token" value="${escapeHtml(token)}">
+                  <input type="hidden" name="line_user_id" value="${escapeHtml(renewUser.line_user_id)}">
+                  <h3>加油包充值</h3>
+                  <div class="renew-grid compact">
+                    <label>增加额度
+                      <select name="topup_chars">${renderQuotaOptions(100000)}</select>
+                    </label>
+                    <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
+                  </div>
+                  <p class="meta">加油包只增加额外字符，不改变到期日；账号过期后加油包不可用。</p>
+                  <div class="form-actions">
+                    <button type="submit">提交加油包充值</button>
+                  </div>
+                </form>
+              </div>
+            </div>`
+          : `<p class="meta">输入 USERID 并点击检索后，可查看用户基本信息、月度续费和加油包充值选项。</p>`
+      }
+    </section>`;
+}
+
+function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, renewUserNotFound, token, message, adminEmail }) {
   const defaultExpiry = defaultExpiryDate();
 
   return `<!doctype html>
@@ -764,10 +911,12 @@ function renderAdminPage({ activeUsers, expiredUsers, token, message, adminEmail
     form { margin: 0; }
     .panel, .user { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; margin-bottom: 10px; }
     .panel { padding: 16px; }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 14px; align-items: start; }
     .wide { grid-column: span 2; }
-    label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #4b5870; }
-    input, select { box-sizing: border-box; width: 100%; padding: 9px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; background: #fff; }
+    label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; color: #4b5870; }
+    input, select { box-sizing: border-box; width: 100%; height: 38px; padding: 8px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; line-height: 20px; background: #fff; }
+    input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 auto; }
+    .field-row { display: grid; grid-template-columns: minmax(92px, .9fr) minmax(130px, 1.1fr); gap: 8px; }
     code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
     button { padding: 9px 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; }
     button.secondary { background: #536078; }
@@ -782,13 +931,26 @@ function renderAdminPage({ activeUsers, expiredUsers, token, message, adminEmail
     .quota-strip div { background: #f8fafc; border: 1px solid #e8edf3; border-radius: 6px; padding: 10px; }
     .quota-strip b, .quota-strip span { display: block; }
     .quota-strip span { color: #536078; font-size: 13px; margin-top: 4px; }
-    .renew-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 12px; align-items: end; }
-    .check { justify-content: end; flex-direction: row; align-items: center; }
-    .check input { width: auto; }
+    .renew-grid { display: grid; grid-template-columns: minmax(240px, 1.4fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr); gap: 14px; align-items: start; }
+    .renew-grid.compact { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
+    .lookup-form { display: grid; grid-template-columns: minmax(260px, 1fr) auto; gap: 12px; align-items: end; }
+    .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; margin-top: 14px; }
+    .metric { background: #f8fafc; border: 1px solid #e8edf3; border-radius: 6px; padding: 9px 10px; min-height: 38px; box-sizing: border-box; }
+    .metric b, .metric span { display: block; }
+    .metric b { color: #4b5870; font-size: 12px; font-weight: 600; }
+    .metric span { color: #172033; font-size: 14px; margin-top: 3px; overflow-wrap: anywhere; }
+    .renew-user { border-top: 1px solid #e8edf3; margin-top: 14px; padding-top: 14px; }
+    .renew-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    .renew-card { border: 1px solid #e8edf3; border-radius: 8px; padding: 14px; background: #fbfcfe; }
+    .renew-card h3 { margin: 0 0 12px; font-size: 16px; }
+    .form-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
+    .check { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; min-height: 38px; color: #4b5870; }
+    .check input { width: 16px; }
     .meta { color: #536078; font-size: 13px; margin: 10px 0 0; }
     .message { background: #ecfdf3; border: 1px solid #abefc6; color: #067647; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
+    .message.error { background: #fff1f0; border-color: #ffccc7; color: #a8071a; margin-top: 14px; }
     @media (max-width: 860px) {
-      .grid, .quota-strip, .renew-grid { grid-template-columns: 1fr; }
+      .grid, .quota-strip, .renew-grid, .renew-grid.compact, .field-row, .lookup-form, .metric-grid, .renew-actions { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
       summary { align-items: flex-start; flex-direction: column; }
       .summary-stats { justify-content: flex-start; }
@@ -818,53 +980,28 @@ function renderAdminPage({ activeUsers, expiredUsers, token, message, adminEmail
           <input type="hidden" name="from_lang" value="zh">
           <input type="hidden" name="to_lang" value="th">
           <label>到期日期
-            <select class="expiry-preset" data-target="new-expires-at">
-              <option value="1" selected>1 个月</option>
-              <option value="3">3 个月</option>
-              <option value="6">6 个月</option>
-              <option value="12">12 个月</option>
-              <option value="custom">自定义</option>
-            </select>
-            <input id="new-expires-at" name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}">
+            <span class="field-row">
+              <select class="expiry-preset" data-target="new-expires-at">
+                <option value="1" selected>1 个月</option>
+                <option value="3">3 个月</option>
+                <option value="6">6 个月</option>
+                <option value="12">12 个月</option>
+                <option value="custom">自定义</option>
+              </select>
+              <input id="new-expires-at" name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}">
+            </span>
           </label>
-          <label>月度额度<input name="monthly_quota_chars" type="number" min="0" step="1" value="100000"></label>
-          <label>月度已用<input name="monthly_used_chars" type="number" min="0" step="1" value="0"></label>
-          <label>加油包额度<input name="extra_quota_chars" type="number" min="0" step="1" value="0"></label>
-          <label>加油包已用<input name="extra_used_chars" type="number" min="0" step="1" value="0"></label>
+          <label>月度额度<select name="monthly_quota_chars">${renderQuotaOptions(100000)}</select></label>
+          <input type="hidden" name="monthly_used_chars" value="0">
+          <input type="hidden" name="extra_quota_chars" value="0">
+          <input type="hidden" name="extra_used_chars" value="0">
           <label class="wide">备注<input name="notes" placeholder="收款/套餐/客户备注"></label>
         </div>
         <p><button type="submit">创建用户</button></p>
       </form>
     </section>
 
-    <section class="panel">
-      <h2>续费模块</h2>
-      <form method="post" action="/admin/renewals">
-        <input type="hidden" name="token" value="${escapeHtml(token)}">
-        <div class="renew-grid">
-          <label>USERID<input name="line_user_id" placeholder="输入需要续费的 USERID" required></label>
-          <label>续费类型
-            <select name="renewal_type" id="renewal-type">
-              <option value="monthly">月度续费</option>
-              <option value="topup">加油包充值</option>
-            </select>
-          </label>
-          <label>续费月数
-            <select name="months">
-              <option value="1">1 个月</option>
-              <option value="3">3 个月</option>
-              <option value="6">6 个月</option>
-              <option value="12">12 个月</option>
-            </select>
-          </label>
-          <label>字符数<input name="chars" type="number" min="0" step="1" value="100000"></label>
-          <label class="check"><input name="reset_monthly_used" type="checkbox" checked> 月度续费时清零本月已用</label>
-          <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
-        </div>
-        <p class="meta">月度续费会延长账号有效期；加油包充值只增加额外字符，不改变到期日。账号过期后，加油包余额也不可用。</p>
-        <p><button type="submit">提交续费</button></p>
-      </form>
-    </section>
+    ${renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token })}
 
     <h2>有效用户（即将到期优先，前 20 条）</h2>
     ${renderUserRows(activeUsers, token) || '<section class="panel">暂无有效用户。</section>'}
@@ -1010,7 +1147,7 @@ app.get("/admin/logout", (_req, res) => {
 
 app.get("/admin", requireAdmin, async (req, res) => {
   try {
-    const data = await loadAdminData();
+    const data = await loadAdminData(req.query.renew_userid || "");
     res.status(200).send(
       renderAdminPage({
         ...data,
@@ -1048,7 +1185,18 @@ app.post("/admin/users", requireAdmin, async (req, res) => {
 
 app.post("/admin/users/:id", requireAdmin, async (req, res) => {
   const token = adminTokenFromRequest(req);
-  const input = normalizeUserInput(req.body);
+  const { data: existing, error: loadError } = await supabase
+    .from("users")
+    .select("*")
+    .eq("id", req.params.id)
+    .single();
+
+  if (loadError || !existing) {
+    res.redirect(buildAdminRedirect(token, `保存失败：${loadError?.message || "用户不存在"}`));
+    return;
+  }
+
+  const input = normalizeUserInput(req.body, existing);
   const validationError = validateUserInput(input);
 
   if (validationError) {
@@ -1073,95 +1221,120 @@ app.post("/admin/users/:id", requireAdmin, async (req, res) => {
   res.redirect(buildAdminRedirect(token, "用户已保存。"));
 });
 
-app.post("/admin/renewals", requireAdmin, async (req, res) => {
+app.post("/admin/users/:id/renew-monthly", requireAdmin, async (req, res) => {
   const token = adminTokenFromRequest(req);
   const lineUserId = String(req.body.line_user_id || "").trim();
-  const renewalType = String(req.body.renewal_type || "monthly");
-  const chars = parseNonNegativeInteger(req.body.chars);
+  const chars = parseNonNegativeInteger(req.body.monthly_quota_chars);
   const months = Math.max(1, Number.parseInt(req.body.months || "1", 10) || 1);
   const note = String(req.body.note || "").trim();
 
-  if (!lineUserId) {
-    res.redirect(buildAdminRedirect(token, "USERID 不能为空。"));
+  if (chars <= 0) {
+    res.redirect(buildAdminRedirectWithRenewUser(token, "月度续费额度必须大于 0。", lineUserId));
     return;
   }
 
   const { data: user, error: loadError } = await supabase
     .from("users")
     .select("*")
-    .eq("line_user_id", lineUserId)
-    .maybeSingle();
+    .eq("id", req.params.id)
+    .single();
 
   if (loadError || !user) {
-    res.redirect(buildAdminRedirect(token, `续费失败：${loadError?.message || "找不到该 USERID"}`));
+    res.redirect(buildAdminRedirectWithRenewUser(token, `月度续费失败：${loadError?.message || "找不到该用户"}`, lineUserId));
     return;
   }
 
+  const today = getBangkokDateString();
+  const currentExpiry = formatDateInput(user.expires_at);
+  const baseDate =
+    currentExpiry && new Date(`${currentExpiry}T23:59:59+07:00`).getTime() > Date.now()
+      ? currentExpiry
+      : today;
+  const nextExpiryDate = addMonthsToDateString(baseDate, months);
   const patch = {
     status: "active",
+    monthly_quota_chars: chars,
+    expires_at: normalizeExpiryDate(nextExpiryDate),
+    billing_period: getCurrentBillingPeriod(),
     updated_at: new Date().toISOString(),
   };
-  let renewalNote = note;
-  let charsDelta = 0;
-  let expiresAtAfter = user.expires_at;
 
-  if (renewalType === "monthly") {
-    if (chars <= 0) {
-      res.redirect(buildAdminRedirect(token, "月度续费字符数必须大于 0。"));
-      return;
-    }
-
-    const today = getBangkokDateString();
-    const currentExpiry = formatDateInput(user.expires_at);
-    const baseDate =
-      currentExpiry && new Date(`${currentExpiry}T23:59:59+07:00`).getTime() > Date.now()
-        ? currentExpiry
-        : today;
-    const nextExpiryDate = addMonthsToDateString(baseDate, months);
-
-    patch.monthly_quota_chars = chars;
-    patch.expires_at = normalizeExpiryDate(nextExpiryDate);
-    patch.billing_period = getCurrentBillingPeriod();
-    if (req.body.reset_monthly_used === "on") patch.monthly_used_chars = 0;
-    expiresAtAfter = patch.expires_at;
-    charsDelta = chars;
-    renewalNote = renewalNote || `月度续费 ${months} 个月，月度额度 ${chars} 字符`;
-  } else if (renewalType === "topup") {
-    if (chars <= 0) {
-      res.redirect(buildAdminRedirect(token, "加油包字符数必须大于 0。"));
-      return;
-    }
-
-    patch.extra_quota_chars = Number(user.extra_quota_chars || 0) + chars;
-    charsDelta = chars;
-    renewalNote = renewalNote || `加油包充值 ${chars} 字符`;
-  } else {
-    res.redirect(buildAdminRedirect(token, "续费类型不正确。"));
-    return;
-  }
+  if (req.body.reset_monthly_used === "on") patch.monthly_used_chars = 0;
 
   const { error: updateError } = await supabase.from("users").update(patch).eq("id", user.id);
 
   if (updateError) {
     console.error("Renew user failed:", updateError);
-    res.redirect(buildAdminRedirect(token, `续费失败：${updateError.message}`));
+    res.redirect(buildAdminRedirectWithRenewUser(token, `月度续费失败：${updateError.message}`, user.line_user_id));
     return;
   }
 
   const { error: renewalError } = await supabase.from("user_renewals").insert({
     user_id: user.id,
-    type: renewalType,
-    chars_delta: charsDelta,
+    type: "monthly",
+    chars_delta: chars,
     expires_at_before: user.expires_at,
-    expires_at_after: expiresAtAfter,
-    note: renewalNote,
+    expires_at_after: patch.expires_at,
+    note: note || `月度续费 ${months} 个月，月度额度 ${chars} 字符`,
   });
 
   if (renewalError) {
     console.warn("Record renewal failed:", renewalError.message);
   }
 
-  res.redirect(buildAdminRedirect(token, renewalType === "monthly" ? "月度续费已完成。" : "加油包充值已完成。"));
+  res.redirect(buildAdminRedirectWithRenewUser(token, "月度续费已完成。", user.line_user_id));
+});
+
+app.post("/admin/users/:id/topup", requireAdmin, async (req, res) => {
+  const token = adminTokenFromRequest(req);
+  const lineUserId = String(req.body.line_user_id || "").trim();
+  const topupChars = parseNonNegativeInteger(req.body.topup_chars);
+  const note = String(req.body.note || "").trim();
+
+  if (topupChars <= 0) {
+    res.redirect(buildAdminRedirectWithRenewUser(token, "加油包额度必须大于 0。", lineUserId));
+    return;
+  }
+
+  const { data: user, error: loadError } = await supabase
+    .from("users")
+    .select("*")
+    .eq("id", req.params.id)
+    .single();
+
+  if (loadError || !user) {
+    res.redirect(buildAdminRedirectWithRenewUser(token, `加油包充值失败：${loadError?.message || "找不到该用户"}`, lineUserId));
+    return;
+  }
+
+  const { error: updateError } = await supabase
+    .from("users")
+    .update({
+      extra_quota_chars: Number(user.extra_quota_chars || 0) + topupChars,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", user.id);
+
+  if (updateError) {
+    console.error("Topup user failed:", updateError);
+    res.redirect(buildAdminRedirectWithRenewUser(token, `加油包充值失败：${updateError.message}`, user.line_user_id));
+    return;
+  }
+
+  const { error: renewalError } = await supabase.from("user_renewals").insert({
+    user_id: user.id,
+    type: "topup",
+    chars_delta: topupChars,
+    expires_at_before: user.expires_at,
+    expires_at_after: user.expires_at,
+    note: note || `加油包充值 ${topupChars} 字符`,
+  });
+
+  if (renewalError) {
+    console.warn("Record topup failed:", renewalError.message);
+  }
+
+  res.redirect(buildAdminRedirectWithRenewUser(token, "加油包充值已完成。", user.line_user_id));
 });
 
 app.post("/webhook", line.middleware({ channelSecret: process.env.LINE_CHANNEL_SECRET }), async (req, res) => {
