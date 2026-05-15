@@ -2,6 +2,7 @@ create extension if not exists pgcrypto;
 
 drop function if exists public.increment_customer_usage(uuid, bigint);
 drop function if exists public.increment_user_usage(uuid, bigint);
+drop function if exists public.recharge_user_flow(uuid, bigint, timestamptz);
 drop table if exists public.activations;
 drop table if exists public.conversation_users;
 drop table if exists public.customers;
@@ -92,25 +93,53 @@ returns table (
 language sql
 security definer
 as $$
-  with current_account as (
-    select
-      u.id,
-      u.quota_chars,
-      u.used_chars
-    from public.users u
-    where u.id = p_user_id
-      and p_chars > 0
-      and u.status = 'active'
-      and u.expires_at > now()
-      and u.quota_chars - u.used_chars >= p_chars
-  )
   update public.users u
-  set used_chars = current_account.used_chars + p_chars,
+  set used_chars = u.used_chars + p_chars,
       last_active_at = now(),
       updated_at = now()
-  from current_account
-  where u.id = current_account.id
+  where u.id = p_user_id
+    and p_chars > 0
+    and u.status = 'active'
+    and u.expires_at > now()
+    and u.quota_chars - u.used_chars >= p_chars
   returning u.id, u.used_chars, u.quota_chars;
+$$;
+
+create or replace function public.recharge_user_flow(
+  p_user_id uuid,
+  p_chars bigint,
+  p_expires_at timestamptz
+)
+returns table (
+  id uuid,
+  quota_chars bigint,
+  used_chars bigint,
+  expires_at timestamptz,
+  expires_at_before timestamptz
+)
+language sql
+security definer
+as $$
+  with previous_account as (
+    select u.id, u.expires_at
+    from public.users u
+    where u.id = p_user_id
+  )
+  update public.users u
+  set status = 'active',
+      quota_chars = u.quota_chars + p_chars,
+      expires_at = p_expires_at,
+      updated_at = now()
+  from previous_account
+  where u.id = previous_account.id
+    and p_chars > 0
+    and p_expires_at is not null
+  returning
+    u.id,
+    u.quota_chars,
+    u.used_chars,
+    u.expires_at,
+    previous_account.expires_at as expires_at_before;
 $$;
 
 -- Example manual user creation:

@@ -1298,7 +1298,7 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
 
   const { data: user, error: loadError } = await supabase
     .from("users")
-    .select("*")
+    .select("id, line_user_id")
     .eq("id", req.params.id)
     .single();
 
@@ -1308,18 +1308,17 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
   }
 
   const nextExpiryDate = defaultExpiryDate();
-  const patch = {
-    status: "active",
-    quota_chars: getQuotaChars(user) + rechargeChars,
-    expires_at: normalizeExpiryDate(nextExpiryDate),
-    updated_at: new Date().toISOString(),
-  };
+  const { data: rechargeData, error: updateError } = await supabase.rpc("recharge_user_flow", {
+    p_user_id: user.id,
+    p_chars: rechargeChars,
+    p_expires_at: normalizeExpiryDate(nextExpiryDate),
+  });
 
-  const { error: updateError } = await supabase.from("users").update(patch).eq("id", user.id);
+  const rechargeResult = Array.isArray(rechargeData) ? rechargeData[0] : null;
 
-  if (updateError) {
+  if (updateError || !rechargeResult) {
     console.error("Recharge user failed:", updateError);
-    res.redirect(buildAdminRedirectWithRenewUser(token, `充值失败：${updateError.message}`, user.line_user_id));
+    res.redirect(buildAdminRedirectWithRenewUser(token, `充值失败：${updateError?.message || "更新用户失败"}`, user.line_user_id));
     return;
   }
 
@@ -1327,8 +1326,8 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
     user_id: user.id,
     type: "recharge",
     chars_delta: rechargeChars,
-    expires_at_before: user.expires_at,
-    expires_at_after: patch.expires_at,
+    expires_at_before: rechargeResult.expires_at_before,
+    expires_at_after: rechargeResult.expires_at,
     note: note || `流量充值 ${rechargeChars} 字符，有效期重新计算 1 年`,
   });
 
