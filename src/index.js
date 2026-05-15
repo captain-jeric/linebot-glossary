@@ -174,6 +174,24 @@ const TARGET_LANG_COMMANDS = {
   ar: "ar",
 };
 
+const ADMIN_LANGUAGE_OPTIONS = [
+  "zh",
+  "th",
+  "my",
+  "en",
+  "ja",
+  "ko",
+  "ms",
+  "id",
+  "vi",
+  "hi",
+  "ar",
+  "ru",
+  "de",
+  "fr",
+  "es",
+];
+
 const translationCache = new Map();
 
 function normalizeCode(code) {
@@ -597,11 +615,14 @@ function normalizeUserInput(body, existing = {}) {
 function validateUserInput(input) {
   const validStatuses = new Set(["active", "paused"]);
   const validModes = new Set(["bilingual", "trilingual"]);
+  const validLangs = new Set(ADMIN_LANGUAGE_OPTIONS);
 
   if (!input.line_user_id) return "USERID 不能为空。";
   if (!input.name) return "用户名不能为空。";
   if (!validStatuses.has(input.status)) return "用户状态不正确。";
   if (!validModes.has(input.mode)) return "翻译模式不正确。";
+  if (!validLangs.has(input.from_lang) || !validLangs.has(input.to_lang)) return "默认语言不正确。";
+  if (input.mode === "bilingual" && input.from_lang === input.to_lang) return "源语言和目标语言不能相同。";
   if (!input.expires_at || Number.isNaN(new Date(input.expires_at).getTime())) {
     return "到期日期格式不正确，例如：2026-06-15";
   }
@@ -628,9 +649,15 @@ function buildAdminRedirectWithRenewUser(token, message, lineUserId) {
   return query ? `/admin?${query}` : "/admin";
 }
 
-async function loadAdminData(renewUserId = "") {
+function parseAdminListLimit(value) {
+  const parsed = Number.parseInt(value || "20", 10);
+  return [20, 50, 100].includes(parsed) ? parsed : 20;
+}
+
+async function loadAdminData(renewUserId = "", listLimit = 20) {
   const now = new Date().toISOString();
   const trimmedRenewUserId = String(renewUserId || "").trim();
+  const safeLimit = parseAdminListLimit(listLimit);
   const queries = [
     supabase
       .from("users")
@@ -638,13 +665,13 @@ async function loadAdminData(renewUserId = "") {
       .eq("status", "active")
       .gte("expires_at", now)
       .order("expires_at", { ascending: true })
-      .limit(20),
+      .limit(safeLimit),
     supabase
       .from("users")
       .select("*")
       .or(`expires_at.lt.${now},status.eq.paused`)
       .order("expires_at", { ascending: false })
-      .limit(20),
+      .limit(safeLimit),
   ];
 
   if (trimmedRenewUserId) {
@@ -672,6 +699,7 @@ async function loadAdminData(renewUserId = "") {
     renewUser: renewResult?.data || null,
     renewUserId: trimmedRenewUserId,
     renewUserNotFound: Boolean(trimmedRenewUserId && !renewResult?.data),
+    listLimit: safeLimit,
   };
 }
 
@@ -686,6 +714,20 @@ function renderQuotaOptions(selectedValue = 100000) {
   }
 
   return options.join("");
+}
+
+function renderLanguageOptions(selectedValue = "zh") {
+  const selected = normalizeCode(selectedValue || "zh");
+  return ADMIN_LANGUAGE_OPTIONS.map(
+    (code) => `<option value="${code}" ${selected === code ? "selected" : ""}>${getLangShortLabel(code)}</option>`
+  ).join("");
+}
+
+function renderListLimitOptions(selectedValue = 20) {
+  const selected = parseAdminListLimit(selectedValue);
+  return [20, 50, 100]
+    .map((value) => `<option value="${value}" ${selected === value ? "selected" : ""}>${value} 条</option>`)
+    .join("");
 }
 
 function renderReadonlyMetric(label, value) {
@@ -736,19 +778,19 @@ function renderAdminLogin(errorMessage) {
 </html>`;
 }
 
-function renderUserRows(users, token) {
+function renderUserRows(users) {
   return (users || [])
     .map((user) => {
       const monthlyUsed = getEffectiveMonthlyUsedChars(user);
       const monthlyRemaining = isUserExpired(user) ? 0 : getMonthlyRemainingChars(user);
       const extraRemaining = isUserExpired(user) ? 0 : getExtraRemainingChars(user);
       const totalRemaining = getRemainingChars(user);
-      const statusOptions = ["active", "paused"]
-        .map((status) => `<option value="${status}" ${user.status === status ? "selected" : ""}>${status}</option>`)
-        .join("");
-      const modeOptions = ["bilingual", "trilingual"]
-        .map((mode) => `<option value="${mode}" ${user.mode === mode ? "selected" : ""}>${mode}</option>`)
-        .join("");
+      const status = isUserExpired(user) ? "已过期" : user.status;
+      const mode = user.mode === "trilingual" ? "三语模式" : "双语模式";
+      const languages =
+        user.mode === "trilingual"
+          ? "中文 / ภาษาไทย / မြန်မာဘာသာ"
+          : `${getLangName(user.from_lang)} ↔ ${getLangName(user.to_lang)}`;
 
       return `<details class="user">
         <summary>
@@ -763,39 +805,23 @@ function renderUserRows(users, token) {
         </summary>
 
         <div class="user-body">
-          <div class="quota-strip">
-            <div>
-              <b>月度套餐</b>
-              <span>${formatNumber(user.monthly_quota_chars)} / 已用 ${formatNumber(monthlyUsed)} / 剩 ${formatNumber(monthlyRemaining)}</span>
-            </div>
-            <div>
-              <b>加油包</b>
-              <span>${formatNumber(user.extra_quota_chars || 0)} / 已用 ${formatNumber(user.extra_used_chars || 0)} / 可用剩余 ${formatNumber(extraRemaining)}</span>
-            </div>
-            <div>
-              <b>账号</b>
-              <span>过期后月度套餐和加油包都不可用 · 最近使用 ${escapeHtml(formatDate(user.last_active_at))}</span>
-            </div>
+          <div class="metric-grid">
+            ${renderReadonlyMetric("用户名", user.name)}
+            ${renderReadonlyMetric("USERID", user.line_user_id)}
+            ${renderReadonlyMetric("状态", status)}
+            ${renderReadonlyMetric("到期日期", formatDate(user.expires_at))}
+            ${renderReadonlyMetric("模式", mode)}
+            ${renderReadonlyMetric("语言", languages)}
+            ${renderReadonlyMetric("月度额度", `${formatNumber(user.monthly_quota_chars)} 字符`)}
+            ${renderReadonlyMetric("月度已用", `${formatNumber(monthlyUsed)} 字符`)}
+            ${renderReadonlyMetric("月度剩余", `${formatNumber(monthlyRemaining)} 字符`)}
+            ${renderReadonlyMetric("加油包额度", `${formatNumber(user.extra_quota_chars || 0)} 字符`)}
+            ${renderReadonlyMetric("加油包已用", `${formatNumber(user.extra_used_chars || 0)} 字符`)}
+            ${renderReadonlyMetric("加油包剩余", `${formatNumber(extraRemaining)} 字符`)}
+            ${renderReadonlyMetric("总剩余", `${formatNumber(totalRemaining)} 字符`)}
+            ${renderReadonlyMetric("最近使用", formatDate(user.last_active_at))}
+            ${renderReadonlyMetric("备注", user.notes || "-")}
           </div>
-
-          <form method="post" action="/admin/users/${escapeHtml(user.id)}">
-            <input type="hidden" name="token" value="${escapeHtml(token)}">
-            <div class="grid">
-              <label>USERID<input name="line_user_id" value="${escapeHtml(user.line_user_id)}"></label>
-              <label>用户名<input name="name" value="${escapeHtml(user.name)}"></label>
-              <label>状态<select name="status">${statusOptions}</select></label>
-              <label>模式<select name="mode">${modeOptions}</select></label>
-              <label>到期日期<input name="expires_at" type="date" value="${escapeHtml(formatDateInput(user.expires_at))}"></label>
-              <label>源语言<input name="from_lang" value="${escapeHtml(user.from_lang || "zh")}"></label>
-              <label>目标语言<input name="to_lang" value="${escapeHtml(user.to_lang || "th")}"></label>
-              ${renderReadonlyMetric("月度额度", `${formatNumber(user.monthly_quota_chars)} 字符`)}
-              ${renderReadonlyMetric("月度已用", `${formatNumber(monthlyUsed)} 字符`)}
-              ${renderReadonlyMetric("加油包额度", `${formatNumber(user.extra_quota_chars || 0)} 字符`)}
-              ${renderReadonlyMetric("加油包已用", `${formatNumber(user.extra_used_chars || 0)} 字符`)}
-              <label class="wide">备注<input name="notes" value="${escapeHtml(user.notes || "")}"></label>
-            </div>
-            <p><button type="submit">保存用户</button></p>
-          </form>
         </div>
       </details>`;
     })
@@ -892,8 +918,9 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }
     </section>`;
 }
 
-function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, renewUserNotFound, token, message, adminEmail }) {
+function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, renewUserNotFound, listLimit, token, message, adminEmail }) {
   const defaultExpiry = defaultExpiryDate();
+  const safeListLimit = parseAdminListLimit(listLimit);
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -943,6 +970,10 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .renew-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
     .renew-card { border: 1px solid #e8edf3; border-radius: 8px; padding: 14px; background: #fbfcfe; }
     .renew-card h3 { margin: 0 0 12px; font-size: 16px; }
+    .list-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 24px; flex-wrap: wrap; }
+    .list-toolbar h2 { margin: 0; }
+    .limit-form { display: flex; align-items: end; gap: 10px; }
+    .limit-form label { width: 130px; }
     .form-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
     .check { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; min-height: 38px; color: #4b5870; }
     .check input { width: 16px; }
@@ -952,6 +983,9 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     @media (max-width: 860px) {
       .grid, .quota-strip, .renew-grid, .renew-grid.compact, .field-row, .lookup-form, .metric-grid, .renew-actions { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
+      .list-toolbar { align-items: stretch; flex-direction: column; }
+      .limit-form { align-items: stretch; }
+      .limit-form label { width: 100%; }
       summary { align-items: flex-start; flex-direction: column; }
       .summary-stats { justify-content: flex-start; }
       main { padding: 14px; }
@@ -977,8 +1011,8 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
             </select>
           </label>
           <input type="hidden" name="mode" value="bilingual">
-          <input type="hidden" name="from_lang" value="zh">
-          <input type="hidden" name="to_lang" value="th">
+          <label>源语言<select name="from_lang">${renderLanguageOptions("zh")}</select></label>
+          <label>目标语言<select name="to_lang">${renderLanguageOptions("th")}</select></label>
           <label>到期日期
             <span class="field-row">
               <select class="expiry-preset" data-target="new-expires-at">
@@ -1003,11 +1037,19 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
 
     ${renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token })}
 
-    <h2>有效用户（即将到期优先，前 20 条）</h2>
-    ${renderUserRows(activeUsers, token) || '<section class="panel">暂无有效用户。</section>'}
+    <div class="list-toolbar">
+      <h2>有效用户（即将到期优先，前 ${safeListLimit} 条）</h2>
+      <form method="get" action="/admin" class="limit-form">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        ${renewUserId ? `<input type="hidden" name="renew_userid" value="${escapeHtml(renewUserId)}">` : ""}
+        <label>显示数量<select name="limit">${renderListLimitOptions(safeListLimit)}</select></label>
+        <button type="submit" class="secondary">应用</button>
+      </form>
+    </div>
+    ${renderUserRows(activeUsers) || '<section class="panel">暂无有效用户。</section>'}
 
-    <h2>过期用户（刚刚过期优先，前 20 条）</h2>
-    ${renderUserRows(expiredUsers, token) || '<section class="panel">暂无过期用户。</section>'}
+    <h2>过期用户（刚刚过期优先，前 ${safeListLimit} 条）</h2>
+    ${renderUserRows(expiredUsers) || '<section class="panel">暂无过期用户。</section>'}
   </main>
   <script>
     (() => {
@@ -1147,7 +1189,7 @@ app.get("/admin/logout", (_req, res) => {
 
 app.get("/admin", requireAdmin, async (req, res) => {
   try {
-    const data = await loadAdminData(req.query.renew_userid || "");
+    const data = await loadAdminData(req.query.renew_userid || "", req.query.limit || "20");
     res.status(200).send(
       renderAdminPage({
         ...data,
@@ -1181,44 +1223,6 @@ app.post("/admin/users", requireAdmin, async (req, res) => {
   }
 
   res.redirect(buildAdminRedirect(token, "用户已创建。"));
-});
-
-app.post("/admin/users/:id", requireAdmin, async (req, res) => {
-  const token = adminTokenFromRequest(req);
-  const { data: existing, error: loadError } = await supabase
-    .from("users")
-    .select("*")
-    .eq("id", req.params.id)
-    .single();
-
-  if (loadError || !existing) {
-    res.redirect(buildAdminRedirect(token, `保存失败：${loadError?.message || "用户不存在"}`));
-    return;
-  }
-
-  const input = normalizeUserInput(req.body, existing);
-  const validationError = validateUserInput(input);
-
-  if (validationError) {
-    res.redirect(buildAdminRedirect(token, validationError));
-    return;
-  }
-
-  const { error } = await supabase
-    .from("users")
-    .update({
-      ...input,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", req.params.id);
-
-  if (error) {
-    console.error("Update user failed:", error);
-    res.redirect(buildAdminRedirect(token, `保存失败：${error.message}`));
-    return;
-  }
-
-  res.redirect(buildAdminRedirect(token, "用户已保存。"));
 });
 
 app.post("/admin/users/:id/renew-monthly", requireAdmin, async (req, res) => {
