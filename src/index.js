@@ -848,6 +848,10 @@ function renderReadonlyMetric(label, value) {
   return `<div class="metric"><b>${escapeHtml(label)}</b><span>${escapeHtml(value)}</span></div>`;
 }
 
+function renderInlineMetric(label, value) {
+  return `<div class="metric inline-metric"><b>${escapeHtml(label)}：</b><span>${escapeHtml(value)}</span></div>`;
+}
+
 function renderAdminLogin(errorMessage) {
   const googleConfigured = isGoogleAdminConfigured();
   const tokenConfigured = Boolean(ADMIN_TOKEN);
@@ -968,7 +972,7 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }
               <div class="renew-split">
                 <div class="renew-metrics">
                   <div class="renew-metric-row single">
-                    ${renderReadonlyMetric("USERID", renewUser.line_user_id)}
+                    ${renderInlineMetric("USERID", renewUser.line_user_id)}
                   </div>
                   <div class="renew-metric-row">
                     ${renderReadonlyMetric("用户名", renewUser.name)}
@@ -1042,7 +1046,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     input, select { box-sizing: border-box; width: 100%; height: 38px; padding: 8px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; line-height: 20px; background: #fff; }
     input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 auto; }
     code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
-    button { width: 92px; min-width: 92px; height: 38px; padding: 0 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; white-space: nowrap; }
+    button { width: 92px; min-width: 92px; height: 38px; padding: 0 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; white-space: nowrap; }
     button.secondary { background: #536078; }
     summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; cursor: pointer; }
     summary::-webkit-details-marker { display: none; }
@@ -1059,6 +1063,9 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .metric b, .metric span { display: block; }
     .metric b { color: #4b5870; font-size: 12px; font-weight: 600; }
     .metric span { color: #172033; font-size: 14px; margin-top: 3px; overflow-wrap: anywhere; }
+    .inline-metric { display: flex; align-items: center; gap: 0; min-height: 38px; }
+    .inline-metric b, .inline-metric span { display: inline; margin-top: 0; white-space: nowrap; }
+    .inline-metric span { overflow: hidden; text-overflow: ellipsis; }
     .renew-user { border-top: 1px solid #e8edf3; margin-top: 14px; padding-top: 14px; }
     .renew-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
     .renew-metrics { display: grid; gap: 10px; }
