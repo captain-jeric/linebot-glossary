@@ -405,6 +405,98 @@ async function findUserByLineUserId(lineUserId) {
   return data || null;
 }
 
+function getConversationBindingKey(event) {
+  if (event.source?.type === "group" && event.source?.groupId) {
+    return { sourceType: "group", conversationId: event.source.groupId };
+  }
+
+  if (event.source?.type === "room" && event.source?.roomId) {
+    return { sourceType: "room", conversationId: event.source.roomId };
+  }
+
+  return null;
+}
+
+async function findConversationBinding(bindingKey) {
+  if (!bindingKey?.conversationId) return null;
+
+  const { data, error } = await supabase
+    .from("conversation_users")
+    .select("translation_enabled, users(*)")
+    .eq("source_type", bindingKey.sourceType)
+    .eq("conversation_id", bindingKey.conversationId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Load conversation user failed:", {
+      error: error.message,
+      sourceType: bindingKey.sourceType,
+      conversationId: bindingKey.conversationId,
+      time: new Date().toISOString(),
+    });
+    return null;
+  }
+
+  if (!data) return null;
+
+  return {
+    translationEnabled: data.translation_enabled !== false,
+    user: data.users || null,
+  };
+}
+
+async function bindConversationToUser(bindingKey, userId) {
+  if (!bindingKey?.conversationId || !userId) return;
+
+  const { error } = await supabase
+    .from("conversation_users")
+    .upsert(
+      {
+        source_type: bindingKey.sourceType,
+        conversation_id: bindingKey.conversationId,
+        user_id: userId,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "source_type,conversation_id" }
+    );
+
+  if (error) {
+    console.warn("Bind conversation user failed:", {
+      error: error.message,
+      sourceType: bindingKey.sourceType,
+      conversationId: bindingKey.conversationId,
+      userId,
+      time: new Date().toISOString(),
+    });
+  }
+}
+
+async function setConversationTranslationEnabled(bindingKey, enabled) {
+  if (!bindingKey?.conversationId) return false;
+
+  const { error } = await supabase
+    .from("conversation_users")
+    .update({
+      translation_enabled: enabled,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("source_type", bindingKey.sourceType)
+    .eq("conversation_id", bindingKey.conversationId);
+
+  if (error) {
+    console.warn("Update conversation translation switch failed:", {
+      error: error.message,
+      sourceType: bindingKey.sourceType,
+      conversationId: bindingKey.conversationId,
+      enabled,
+      time: new Date().toISOString(),
+    });
+    return false;
+  }
+
+  return true;
+}
+
 async function touchUser(userId) {
   if (!userId) return;
 
@@ -1420,7 +1512,16 @@ async function handleEvent(event) {
 
   const lower = text.toLowerCase();
   const targetCommand = parseTargetLangCommand(text);
-  const user = await findUserByLineUserId(lineUserId);
+  const actorUser = await findUserByLineUserId(lineUserId);
+  const bindingKey = getConversationBindingKey(event);
+
+  if (bindingKey && actorUser) {
+    await bindConversationToUser(bindingKey, actorUser.id);
+  }
+
+  const conversationBinding = bindingKey ? await findConversationBinding(bindingKey) : null;
+  const conversationTranslationEnabled = conversationBinding?.translationEnabled !== false;
+  const user = actorUser || conversationBinding?.user || null;
 
   if (isUserIdCommand(lower) || isUsageCommand(lower)) {
     return reply(event, buildUserUsageText(lineUserId, user));
@@ -1435,10 +1536,18 @@ async function handleEvent(event) {
   }
 
   if (isStatusCommand(lower)) {
-    return reply(event, buildStatusText(event, user));
+    return reply(event, buildStatusText(event, user, { conversationTranslationEnabled }));
   }
 
   if (isSetCommand(lower)) {
+    if (!actorUser) return reply(event, buildNeedPermissionText(lineUserId));
+    if (bindingKey && (lower === "set on" || lower === "set off")) {
+      const enabled = lower === "set on";
+      const updated = await setConversationTranslationEnabled(bindingKey, enabled);
+      if (!updated) return reply(event, "切换群聊翻译开关失败，请稍后再试。");
+      await touchUser(actorUser.id);
+      return reply(event, enabled ? "群聊自动翻译已开启。" : "群聊自动翻译已关闭。\n之后只有 /TH、/ZH、/MM 等指定翻译命令会触发翻译。");
+    }
     return handleSetCommand(event, lower, user);
   }
 
@@ -1455,6 +1564,8 @@ async function handleEvent(event) {
   if (targetCommand && !targetCommand.text) {
     return reply(event, `请输入要翻译的内容，例如：/${targetCommand.targetLang.toUpperCase()} 你好`);
   }
+
+  if (bindingKey && !conversationTranslationEnabled && !targetCommand) return null;
 
   const textToTranslate = targetCommand?.text || text;
   const mode = user.mode || "bilingual";
@@ -1476,6 +1587,7 @@ async function handleEvent(event) {
     mode,
     sourceType: event.source?.type,
     lineUserId,
+    billingLineUserId: user.line_user_id,
     textLength: textToTranslate.length,
     chargedChars,
     time: new Date().toISOString(),
@@ -1523,7 +1635,7 @@ function buildUserUsageText(lineUserId, user) {
   ].join("\n");
 }
 
-function buildStatusText(event, user) {
+function buildStatusText(event, user, options = {}) {
   const userCheck = isUserUsable(user);
   const lines = ["当前翻译状态", ""];
 
@@ -1538,6 +1650,9 @@ function buildStatusText(event, user) {
     lines.push("语言：中文 / ภาษาไทย / မြန်မာဘာသာ");
   } else {
     lines.push(`语言：${getLangName(user.from_lang)} ↔ ${getLangName(user.to_lang)}`);
+  }
+  if (getConversationBindingKey(event)) {
+    lines.push(`群聊自动翻译：${options.conversationTranslationEnabled === false ? "关闭" : "开启"}`);
   }
   lines.push("");
   lines.push("发送 /usage 查看额度。");
@@ -1650,6 +1765,9 @@ function buildSetHelpText(title) {
     "/VI 内容    指定翻译成越南文",
     "/HI 内容    指定翻译成印地文",
     "/AR 内容    指定翻译成阿拉伯文",
+    "",
+    "set on       开启群聊自动翻译",
+    "set off      关闭群聊自动翻译，只保留 /TH 等指定翻译",
     "",
     "/status      查看当前状态",
     "/usage       查看额度",

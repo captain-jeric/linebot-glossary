@@ -3,6 +3,7 @@ create extension if not exists pgcrypto;
 drop function if exists public.increment_customer_usage(uuid, bigint);
 drop function if exists public.increment_user_usage(uuid, bigint);
 drop table if exists public.activations;
+drop table if exists public.conversation_users;
 drop table if exists public.customers;
 drop table if exists public.user_renewals;
 drop table if exists public.users;
@@ -47,6 +48,20 @@ create index if not exists users_status_expires_at_idx
 create index if not exists user_renewals_user_id_created_at_idx
   on public.user_renewals (user_id, created_at desc);
 
+create table if not exists public.conversation_users (
+  id uuid primary key default gen_random_uuid(),
+  source_type text not null check (source_type in ('group', 'room')),
+  conversation_id text not null,
+  user_id uuid not null references public.users(id) on delete cascade,
+  translation_enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (source_type, conversation_id)
+);
+
+create index if not exists conversation_users_user_id_idx
+  on public.conversation_users (user_id);
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
@@ -60,6 +75,11 @@ $$;
 drop trigger if exists users_set_updated_at on public.users;
 create trigger users_set_updated_at
 before update on public.users
+for each row execute function public.set_updated_at();
+
+drop trigger if exists conversation_users_set_updated_at on public.conversation_users;
+create trigger conversation_users_set_updated_at
+before update on public.conversation_users
 for each row execute function public.set_updated_at();
 
 create or replace function public.increment_user_usage(

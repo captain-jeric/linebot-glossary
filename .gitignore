@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 
+PROJECT_DOCUMENTATION.md
+
 secrets/
 node_modules/
 
