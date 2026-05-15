@@ -1560,8 +1560,12 @@ async function handleEvent(event) {
   const conversationTranslationEnabled = conversationBinding?.translationEnabled !== false;
   const user = actorUser || conversationBinding?.user || null;
 
-  if (isUserIdCommand(lower) || isUsageCommand(lower)) {
-    return reply(event, buildUserUsageText(lineUserId, user));
+  if (isUserIdCommand(lower)) {
+    return reply(event, buildUserIdText(lineUserId, user));
+  }
+
+  if (isUsageCommand(lower)) {
+    return reply(event, buildUserUsageText(user));
   }
 
   if (!user) {
@@ -1660,9 +1664,17 @@ function buildNeedPermissionText(lineUserId) {
   return [`请联系管理员添加权限。`, `USERID：${lineUserId}`].join("\n");
 }
 
-function buildUserUsageText(lineUserId, user) {
+function buildUserIdText(lineUserId, user) {
   if (!user) {
     return [`当前账号尚未开通权限。`, `请联系管理员添加权限。`, `USERID：${lineUserId}`].join("\n");
+  }
+
+  return [`USERID：${lineUserId}`, `发送 /usage 查看额度。`].join("\n");
+}
+
+function buildUserUsageText(user) {
+  if (!user) {
+    return [`当前账号尚未开通权限。`, `请联系管理员添加权限。`, `发送 userid 查看 USERID。`].join("\n");
   }
 
   const expired = isUserExpired(user);
@@ -1670,8 +1682,8 @@ function buildUserUsageText(lineUserId, user) {
   const extraRemaining = expired ? 0 : getExtraRemainingChars(user);
 
   return [
-    `USERID：${lineUserId}`,
-    `用户名：${user.name}`,
+    "当前额度",
+    `账号：${user.name}`,
     `状态：${expired ? "已过期" : user.status}`,
     `有效期：${formatDate(user.expires_at)}`,
     `月度剩余：${formatNumber(monthlyRemaining)} 字符`,
@@ -1816,7 +1828,7 @@ function buildSetHelpText(title) {
     "",
     "/status      查看当前状态",
     "/usage       查看额度",
-    "userid       查看 USERID 和用量",
+    "userid       查看 USERID",
   ].join("\n");
 }
 
