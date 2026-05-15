@@ -242,6 +242,10 @@ function isUsageCommand(lower) {
   return lower === "/usage" || lower === "/用量";
 }
 
+function isHelpCommand(lower) {
+  return lower === "/help" || lower === "help" || lower === "/帮助" || lower === "帮助";
+}
+
 function isSetCommand(lower) {
   return lower.startsWith("set ") || lower === "set";
 }
@@ -1449,6 +1453,10 @@ async function handleEvent(event) {
   const conversationTranslationEnabled = conversationBinding?.translationEnabled !== false;
   const user = actorUser || conversationBinding?.user || null;
 
+  if (isHelpCommand(lower)) {
+    return reply(event, buildPublicHelpText());
+  }
+
   if (isUserIdCommand(lower)) {
     return reply(event, buildUserIdText(lineUserId, user));
   }
@@ -1624,6 +1632,28 @@ function buildQuotaExceededText(lineUserId, user) {
   ].join("\n");
 }
 
+const DIRECT_TRANSLATION_HELP_LINES = [
+  "/TH 内容    指定翻译成泰文",
+  "/MM 内容    指定翻译成缅文",
+  "/ZH 内容    指定翻译成中文",
+  "/EN 内容    指定翻译成英文",
+  "/JP 内容    指定翻译成日文",
+  "/DE 内容    指定翻译成德文",
+  "/FR 内容    指定翻译成法文",
+  "/ES 内容    指定翻译成西文",
+  "/RU 内容    指定翻译成俄文",
+  "/MS 内容    指定翻译成马来文",
+  "/KO 内容    指定翻译成韩文",
+  "/ID 内容    指定翻译成印尼文",
+  "/VI 内容    指定翻译成越南文",
+  "/HI 内容    指定翻译成印地文",
+  "/AR 内容    指定翻译成阿拉伯文",
+];
+
+function buildPublicHelpText() {
+  return ["指定翻译方法", ...DIRECT_TRANSLATION_HELP_LINES].join("\n");
+}
+
 async function handleSetCommand(event, lower, user) {
   const parts = lower.trim().split(/\s+/);
   const sub = parts[1];
@@ -1693,19 +1723,7 @@ function buildSetHelpText(title) {
   return [
     title,
     "",
-    "/TH 内容    指定翻译成泰文",
-    "/MM 内容    指定翻译成缅文",
-    "/ZH 内容    指定翻译成中文",
-    "/EN 内容    指定翻译成英文",
-    "/JP 内容    指定翻译成日文",
-    "/DE /FR /ES  指定翻译成德/法/西",
-    "/RU 内容    指定翻译成俄文",
-    "/MS 内容    指定翻译成马来文",
-    "/KO 内容    指定翻译成韩文",
-    "/ID 内容    指定翻译成印尼文",
-    "/VI 内容    指定翻译成越南文",
-    "/HI 内容    指定翻译成印地文",
-    "/AR 内容    指定翻译成阿拉伯文",
+    ...DIRECT_TRANSLATION_HELP_LINES,
     "",
     "set on       开启群聊自动翻译",
     "set off      关闭群聊自动翻译，只保留 /TH 等指定翻译",
