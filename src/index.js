@@ -405,6 +405,27 @@ async function findUserByLineUserId(lineUserId) {
   return data || null;
 }
 
+async function findUserById(userId) {
+  if (!userId) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Load user by id failed:", {
+      error: error.message,
+      userId,
+      time: new Date().toISOString(),
+    });
+    return null;
+  }
+
+  return data || null;
+}
+
 function getConversationBindingKey(event) {
   if (event.source?.type === "group" && event.source?.groupId) {
     return { sourceType: "group", conversationId: event.source.groupId };
@@ -422,7 +443,7 @@ async function findConversationBinding(bindingKey) {
 
   const { data, error } = await supabase
     .from("conversation_users")
-    .select("translation_enabled, users(*)")
+    .select("user_id, translation_enabled")
     .eq("source_type", bindingKey.sourceType)
     .eq("conversation_id", bindingKey.conversationId)
     .maybeSingle();
@@ -439,9 +460,19 @@ async function findConversationBinding(bindingKey) {
 
   if (!data) return null;
 
+  const user = await findUserById(data.user_id);
+  if (!user) {
+    console.warn("Conversation binding has no valid user:", {
+      sourceType: bindingKey.sourceType,
+      conversationId: bindingKey.conversationId,
+      userId: data.user_id,
+      time: new Date().toISOString(),
+    });
+  }
+
   return {
     translationEnabled: data.translation_enabled !== false,
-    user: data.users || null,
+    user,
   };
 }
 
@@ -468,7 +499,15 @@ async function bindConversationToUser(bindingKey, userId) {
       userId,
       time: new Date().toISOString(),
     });
+    return;
   }
+
+  console.log("Conversation bound to user:", {
+    sourceType: bindingKey.sourceType,
+    conversationId: bindingKey.conversationId,
+    userId,
+    time: new Date().toISOString(),
+  });
 }
 
 async function setConversationTranslationEnabled(bindingKey, enabled) {
@@ -1531,6 +1570,14 @@ async function handleEvent(event) {
     if (event.source?.type === "user") return reply(event, buildNeedPermissionText(lineUserId));
     if (isStatusCommand(lower) || isSetCommand(lower) || targetCommand) {
       return reply(event, buildNeedPermissionText(lineUserId));
+    }
+    if (bindingKey) {
+      console.log("Ignored group message without conversation binding:", {
+        sourceType: bindingKey.sourceType,
+        conversationId: bindingKey.conversationId,
+        lineUserId,
+        time: new Date().toISOString(),
+      });
     }
     return null;
   }
