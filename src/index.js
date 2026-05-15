@@ -1067,13 +1067,13 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .inline-metric b, .inline-metric span { display: inline; margin-top: 0; white-space: nowrap; }
     .inline-metric span { overflow: hidden; text-overflow: ellipsis; }
     .renew-user { border-top: 1px solid #e8edf3; margin-top: 14px; padding-top: 14px; }
-    .renew-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .renew-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
     .renew-metrics { display: grid; gap: 10px; }
     .renew-metric-row { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 10px; }
     .renew-metric-row.single { grid-template-columns: 1fr; }
     .renew-metrics .metric { margin: 0; }
     .renew-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
-    .renew-card { min-height: 230px; border: 1px solid #e8edf3; border-radius: 8px; padding: 14px; background: #fbfcfe; }
+    .renew-card { min-height: 100%; border: 1px solid #e8edf3; border-radius: 8px; padding: 14px; background: #fbfcfe; box-sizing: border-box; }
     .renew-card h3 { margin: 0 0 12px; font-size: 16px; }
     .list-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 24px; flex-wrap: wrap; }
     .list-toolbar h2 { margin: 0; }
