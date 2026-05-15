@@ -88,16 +88,38 @@ const translateClient = new Translate(buildTranslateClientOptions());
 const THREE_LANGS = ["zh", "th", "my"];
 
 const VALID_LANG_PAIRS = new Set([
+  "ja|zh",
+  "ko|zh",
   "my|zh",
+  "ru|zh",
   "th|zh",
   "en|zh",
+  "th|zh-TW",
+  "zh|zh-TW",
   "my|th",
+  "ru|th",
   "en|th",
   "en|my",
 ]);
 
+const DEFAULT_TRANSLATION_PAIR_HELP_LINES = [
+  "set zh th    设置中文 ↔ 泰文",
+  "set zh my    设置中文 ↔ 缅文",
+  "set zh en    设置中文 ↔ 英文",
+  "set zh ja    设置中文 ↔ 日文",
+  "set zh ko    设置中文 ↔ 韩文",
+  "set zh ru    设置中文 ↔ 俄文",
+  "set zh tw    设置简体中文 ↔ 繁体中文",
+  "set tw th    设置繁体中文 ↔ 泰文",
+  "set th my    设置泰文 ↔ 缅文",
+  "set th en    设置泰文 ↔ 英文",
+  "set th ru    设置泰文 ↔ 俄文",
+  "set my en    设置缅文 ↔ 英文",
+];
+
 const LANG_NAME = {
   zh: "中文",
+  "zh-TW": "繁體中文",
   th: "ภาษาไทย",
   my: "မြန်မာဘာသာ",
   en: "English",
@@ -116,6 +138,7 @@ const LANG_NAME = {
 
 const LANG_FLAG = {
   zh: "🇨🇳",
+  "zh-TW": "🇹🇼",
   th: "🇹🇭",
   my: "🇲🇲",
   en: "🇬🇧",
@@ -134,6 +157,7 @@ const LANG_FLAG = {
 
 const LANG_SHORT_LABEL = {
   zh: "中/中文",
+  "zh-TW": "繁/繁中",
   th: "泰/ไทย",
   my: "缅/မြန်မာ",
   en: "英/EN",
@@ -153,6 +177,9 @@ const LANG_SHORT_LABEL = {
 const TARGET_LANG_COMMANDS = {
   zh: "zh",
   cn: "zh",
+  tw: "zh-TW",
+  hk: "zh-TW",
+  tc: "zh-TW",
   th: "th",
   mm: "my",
   my: "my",
@@ -176,6 +203,7 @@ const TARGET_LANG_COMMANDS = {
 
 const ADMIN_LANGUAGE_OPTIONS = [
   "zh",
+  "zh-TW",
   "th",
   "my",
   "en",
@@ -196,14 +224,20 @@ const translationCache = new Map();
 
 function normalizeCode(code) {
   if (!code) return "und";
-  const value = String(code).toLowerCase();
+  const value = String(code).trim().toLowerCase().replace("_", "-");
+  if (value === "zh-tw" || value === "zh-hk" || value === "zhtw" || value === "zhhk") return "zh-TW";
+  if (value === "tw" || value === "hk" || value === "tc") return "zh-TW";
   if (value.startsWith("zh")) return "zh";
+  if (value === "jp") return "ja";
+  if (value === "mm") return "my";
+  if (value === "kr") return "ko";
   return value;
 }
 
 function toGoogleCode(code) {
   const normalized = normalizeCode(code);
   if (normalized === "zh") return "zh-CN";
+  if (normalized === "zh-TW") return "zh-TW";
   if (normalized === "und") return undefined;
   return normalized;
 }
@@ -1636,6 +1670,7 @@ const DIRECT_TRANSLATION_HELP_LINES = [
   "/TH 内容    指定翻译成泰文",
   "/MM 内容    指定翻译成缅文",
   "/ZH 内容    指定翻译成中文",
+  "/TW 内容    指定翻译成繁体中文",
   "/EN 内容    指定翻译成英文",
   "/JP 内容    指定翻译成日文",
   "/DE 内容    指定翻译成德文",
@@ -1651,7 +1686,13 @@ const DIRECT_TRANSLATION_HELP_LINES = [
 ];
 
 function buildPublicHelpText() {
-  return ["指定翻译方法", ...DIRECT_TRANSLATION_HELP_LINES].join("\n");
+  return [
+    "指定翻译方法",
+    ...DIRECT_TRANSLATION_HELP_LINES,
+    "",
+    "设置群内默认翻译语言",
+    ...DEFAULT_TRANSLATION_PAIR_HELP_LINES,
+  ].join("\n");
 }
 
 async function handleSetCommand(event, lower, user) {
@@ -1724,6 +1765,9 @@ function buildSetHelpText(title) {
     title,
     "",
     ...DIRECT_TRANSLATION_HELP_LINES,
+    "",
+    "可设置的默认翻译语言：",
+    ...DEFAULT_TRANSLATION_PAIR_HELP_LINES,
     "",
     "set on       开启群聊自动翻译",
     "set off      关闭群聊自动翻译，只保留 /TH 等指定翻译",
