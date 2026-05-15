@@ -965,34 +965,36 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }
       ${
         renewUser
           ? `<div class="renew-user">
-              <div class="metric-grid">
-                ${renderReadonlyMetric("用户名", renewUser.name)}
-                ${renderReadonlyMetric("USERID", renewUser.line_user_id)}
-                ${renderReadonlyMetric("状态", userStatus)}
-                ${renderReadonlyMetric("有效期至", formatDate(renewUser.expires_at))}
-                ${renderReadonlyMetric("总购买字符", `${formatNumber(quotaChars)} 字符`)}
-                ${renderReadonlyMetric("已用字符", `${formatNumber(usedChars)} 字符`)}
-                ${renderReadonlyMetric("剩余字符", `${formatNumber(remainingChars)} 字符`)}
-                ${renderReadonlyMetric("充值后有效期", `${nextExpiry}`)}
-                ${renderReadonlyMetric("最近使用", formatDate(renewUser.last_active_at))}
-              </div>
+              <div class="renew-split">
+                <div class="metric-grid renew-metrics">
+                  ${renderReadonlyMetric("用户名", renewUser.name)}
+                  ${renderReadonlyMetric("USERID", renewUser.line_user_id)}
+                  ${renderReadonlyMetric("状态", userStatus)}
+                  ${renderReadonlyMetric("有效期至", formatDate(renewUser.expires_at))}
+                  ${renderReadonlyMetric("总购买字符", `${formatNumber(quotaChars)} 字符`)}
+                  ${renderReadonlyMetric("已用字符", `${formatNumber(usedChars)} 字符`)}
+                  ${renderReadonlyMetric("剩余字符", `${formatNumber(remainingChars)} 字符`)}
+                  ${renderReadonlyMetric("充值后有效期", `${nextExpiry}`)}
+                  ${renderReadonlyMetric("最近使用", formatDate(renewUser.last_active_at))}
+                </div>
 
-              <div class="renew-actions">
-                <form method="post" action="/admin/users/${escapeHtml(renewUser.id)}/recharge" class="renew-card">
-                  <input type="hidden" name="token" value="${escapeHtml(token)}">
-                  <input type="hidden" name="line_user_id" value="${escapeHtml(renewUser.line_user_id)}">
-                  <h3>充值流量</h3>
-                  <div class="renew-grid compact">
-                    <label>增加流量
-                      <select name="recharge_chars">${renderQuotaOptions(100000)}</select>
-                    </label>
-                    <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
-                  </div>
-                  <p class="meta">每次充值都会把有效期重新计算为充值当天起 1 年。</p>
-                  <div class="form-actions">
-                    <button type="submit">提交充值</button>
-                  </div>
-                </form>
+                <div class="renew-actions">
+                  <form method="post" action="/admin/users/${escapeHtml(renewUser.id)}/recharge" class="renew-card">
+                    <input type="hidden" name="token" value="${escapeHtml(token)}">
+                    <input type="hidden" name="line_user_id" value="${escapeHtml(renewUser.line_user_id)}">
+                    <h3>充值流量</h3>
+                    <div class="renew-grid compact">
+                      <label>增加流量
+                        <select name="recharge_chars">${renderQuotaOptions(100000)}</select>
+                      </label>
+                      <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
+                    </div>
+                    <p class="meta">每次充值都会把有效期重新计算为充值当天起 1 年。</p>
+                    <div class="form-actions">
+                      <button type="submit">提交充值</button>
+                    </div>
+                  </form>
+                </div>
               </div>
             </div>`
           : `<p class="meta">输入 USERID 并点击检索后，可查看用户基本信息并充值流量。</p>`
@@ -1025,11 +1027,12 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .wide { grid-column: span 2; }
     .full { grid-column: 1 / -1; }
     .inline-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+    .create-actions { grid-template-columns: minmax(0, calc(50% - 6px)) auto; justify-content: start; }
     label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; color: #4b5870; }
     input, select { box-sizing: border-box; width: 100%; height: 38px; padding: 8px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; line-height: 20px; background: #fff; }
     input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 auto; }
     code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
-    button { padding: 9px 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; }
+    button { width: 92px; min-width: 92px; height: 38px; padding: 0 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; white-space: nowrap; }
     button.secondary { background: #536078; }
     summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; cursor: pointer; }
     summary::-webkit-details-marker { display: none; }
@@ -1040,14 +1043,16 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .user-body { border-top: 1px solid #e8edf3; padding: 14px; }
     .renew-grid { display: grid; grid-template-columns: minmax(240px, 1.4fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr); gap: 14px; align-items: start; }
     .renew-grid.compact { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
-    .lookup-form { display: grid; grid-template-columns: minmax(260px, 1fr) auto; gap: 12px; align-items: end; }
+    .lookup-form { display: grid; grid-template-columns: minmax(260px, calc(50% - 6px)) auto; gap: 12px; align-items: end; justify-content: start; }
     .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; margin-top: 14px; }
     .metric { background: #f8fafc; border: 1px solid #e8edf3; border-radius: 6px; padding: 9px 10px; min-height: 38px; box-sizing: border-box; }
     .metric b, .metric span { display: block; }
     .metric b { color: #4b5870; font-size: 12px; font-weight: 600; }
     .metric span { color: #172033; font-size: 14px; margin-top: 3px; overflow-wrap: anywhere; }
     .renew-user { border-top: 1px solid #e8edf3; margin-top: 14px; padding-top: 14px; }
-    .renew-actions { display: grid; grid-template-columns: minmax(280px, 560px); gap: 14px; margin-top: 14px; }
+    .renew-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .renew-metrics { grid-template-columns: repeat(2, minmax(150px, 1fr)); margin-top: 0; }
+    .renew-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
     .renew-card { border: 1px solid #e8edf3; border-radius: 8px; padding: 14px; background: #fbfcfe; }
     .renew-card h3 { margin: 0 0 12px; font-size: 16px; }
     .list-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 24px; flex-wrap: wrap; }
@@ -1061,7 +1066,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .message { background: #ecfdf3; border: 1px solid #abefc6; color: #067647; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
     .message.error { background: #fff1f0; border-color: #ffccc7; color: #a8071a; margin-top: 14px; }
     @media (max-width: 860px) {
-      .grid, .create-grid, .renew-grid, .renew-grid.compact, .lookup-form, .metric-grid, .renew-actions, .inline-row { grid-template-columns: 1fr; }
+      .grid, .create-grid, .renew-grid, .renew-grid.compact, .lookup-form, .metric-grid, .renew-metrics, .renew-actions, .renew-split, .inline-row, .create-actions { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
       .list-toolbar { align-items: stretch; flex-direction: column; }
       .limit-form { align-items: stretch; }
@@ -1096,7 +1101,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
           <label>目标语言<select name="to_lang">${renderLanguageOptions("th")}</select></label>
           <label>有效期至<input name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}" readonly></label>
           <input type="hidden" name="used_chars" value="0">
-          <div class="full inline-row">
+          <div class="full inline-row create-actions">
             <label>备注<input name="notes" placeholder="收款/套餐/客户备注"></label>
             <button type="submit">创建用户</button>
           </div>
