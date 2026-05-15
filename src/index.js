@@ -1,6 +1,6 @@
 // =========================
-// LINE 群聊翻译机器人
-// 商业激活码版 · Supabase/PostgreSQL 持久化
+// LINE 翻译机器人
+// USERID 授权版 · Supabase/PostgreSQL 持久化
 // =========================
 
 const express = require("express");
@@ -26,8 +26,6 @@ const SESSION_SECRET = process.env.SESSION_SECRET || ADMIN_TOKEN || "";
 const LOG_FULL_WEBHOOK_BODY = process.env.LOG_FULL_WEBHOOK_BODY === "true";
 const MAX_LINE_TEXT_LENGTH = 4900;
 const CACHE_MAX_SIZE = 200;
-const GROUP_SUMMARY_CACHE_TTL_MS = 1000 * 60 * 60 * 6;
-const GROUP_SUMMARY_NEGATIVE_CACHE_TTL_MS = 1000 * 60 * 5;
 const BILLING_TIME_ZONE = "Asia/Bangkok";
 const ADMIN_SESSION_COOKIE = "linebot_admin_session";
 const ADMIN_OAUTH_STATE_COOKIE = "linebot_admin_oauth_state";
@@ -46,13 +44,20 @@ for (const envName of requiredEnvNames) {
   }
 }
 
-const middlewareConfig = {
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
-};
-
 const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
 });
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  }
+);
 
 function parseJsonEnv(name) {
   const value = process.env[name];
@@ -79,17 +84,6 @@ function buildTranslateClientOptions() {
 }
 
 const translateClient = new Translate(buildTranslateClientOptions());
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  }
-);
 
 const THREE_LANGS = ["zh", "th", "my"];
 
@@ -150,7 +144,6 @@ const TARGET_LANG_COMMANDS = {
 };
 
 const translationCache = new Map();
-const groupSummaryCache = new Map();
 
 function normalizeCode(code) {
   if (!code) return "und";
@@ -181,54 +174,15 @@ function getLangShortLabel(code) {
   return LANG_SHORT_LABEL[normalized] || getLangName(normalized);
 }
 
-function getConversation(event) {
-  const source = event.source || {};
-
-  if (source.type === "group" && source.groupId) {
-    return { id: `group:${source.groupId}`, sourceType: "group", label: "群聊" };
-  }
-
-  if (source.type === "room" && source.roomId) {
-    return { id: `room:${source.roomId}`, sourceType: "room", label: "多人聊天室" };
-  }
-
-  if (source.type === "user" && source.userId) {
-    return { id: `user:${source.userId}`, sourceType: "user", label: "私聊" };
-  }
-
-  return { id: null, sourceType: "unknown", label: "未知来源" };
+function getConversationLabel(event) {
+  if (event.source?.type === "group") return "群聊";
+  if (event.source?.type === "room") return "多人聊天室";
+  if (event.source?.type === "user") return "私聊";
+  return "未知来源";
 }
 
-function buildDefaultActivation(conversation) {
-  return {
-    conversation_id: conversation.id,
-    source_type: conversation.sourceType,
-    owner_user_id: null,
-    enabled: true,
-    mode: "bilingual",
-    from_lang: "zh",
-    to_lang: "th",
-  };
-}
-
-function buildActivationFromTemplate(conversation, template = {}) {
-  return {
-    ...buildDefaultActivation(conversation),
-    owner_user_id: template.owner_user_id || null,
-    enabled: true,
-    mode: template.mode || "bilingual",
-    from_lang: template.from_lang || "zh",
-    to_lang: template.to_lang || "th",
-  };
-}
-
-function isActivateCommand(text) {
-  return /^\/?(?:activate|激活)(?:\s+|$)/i.test(text.trim());
-}
-
-function parseActivationCode(text) {
-  const match = text.trim().match(/^\/?(?:activate|激活)\s+(.+)$/i);
-  return match ? match[1].trim() : "";
+function isUserIdCommand(lower) {
+  return lower === "userid" || lower === "/userid" || lower === "user id" || lower === "/user id";
 }
 
 function isStatusCommand(lower) {
@@ -255,100 +209,70 @@ function parseTargetLangCommand(text) {
   return { targetLang, text: body };
 }
 
-function isCustomerUsable(customer) {
-  if (!customer) return { ok: false, reason: "not_found" };
-  if (!customer.activation_code_enabled) return { ok: false, reason: "code_disabled" };
-  if (!["active", "trial"].includes(customer.status)) return { ok: false, reason: "status" };
-  if (customer.expires_at && new Date(customer.expires_at).getTime() <= Date.now()) {
-    return { ok: false, reason: "expired" };
-  }
-  if (getRemainingChars(customer) <= 0) {
-    return { ok: false, reason: "quota" };
-  }
-  return { ok: true, reason: "" };
-}
-
-function getBangkokDateParts(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en", {
+function getBangkokDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: BILLING_TIME_ZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(date);
-
-  return {
-    year: Number(parts.find((part) => part.type === "year")?.value || 0),
-    month: Number(parts.find((part) => part.type === "month")?.value || 0),
-    day: Number(parts.find((part) => part.type === "day")?.value || 0),
-  };
+  const year = parts.find((part) => part.type === "year")?.value || "";
+  const month = parts.find((part) => part.type === "month")?.value || "";
+  const day = parts.find((part) => part.type === "day")?.value || "";
+  return year && month && day ? `${year}-${month}-${day}` : "";
 }
 
-function getCurrentBillingPeriod(cycleDay = 1) {
-  const safeCycleDay = Math.min(28, Math.max(1, Number.parseInt(cycleDay || "1", 10) || 1));
-  const { year, month, day } = getBangkokDateParts();
-  let periodYear = year;
-  let periodMonth = month;
-
-  if (day < safeCycleDay) {
-    periodMonth -= 1;
-    if (periodMonth < 1) {
-      periodMonth = 12;
-      periodYear -= 1;
-    }
-  }
-
-  return `${String(periodYear).padStart(4, "0")}-${String(periodMonth).padStart(2, "0")}`;
+function getCurrentBillingPeriod() {
+  return getBangkokDateString().slice(0, 7);
 }
 
-function formatBillingPeriodStart(period, cycleDay = 1) {
-  const [year, month] = String(period || "").split("-").map((part) => Number.parseInt(part, 10));
-  if (!year || !month) return "";
-  const day = Math.min(28, Math.max(1, Number.parseInt(cycleDay || "1", 10) || 1));
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+function addMonthsToDateString(dateString, months) {
+  const safeMonths = Math.max(1, Number.parseInt(months || "1", 10) || 1);
+  const base = /^\d{4}-\d{2}-\d{2}$/.test(String(dateString || ""))
+    ? new Date(`${dateString}T12:00:00+07:00`)
+    : new Date();
+  const originalDay = base.getDate();
+  const next = new Date(base);
+  next.setMonth(next.getMonth() + safeMonths);
+  if (next.getDate() !== originalDay) next.setDate(0);
+  return getBangkokDateString(next);
 }
 
-function formatNextBillingReset(customer) {
-  const currentPeriod = getCurrentBillingPeriod(customer?.billing_cycle_day);
-  const [year, month] = currentPeriod.split("-").map((part) => Number.parseInt(part, 10));
-  if (!year || !month) return "";
-
-  const nextMonth = month === 12 ? 1 : month + 1;
-  const nextYear = month === 12 ? year + 1 : year;
-  const day = Math.min(28, Math.max(1, Number.parseInt(customer?.billing_cycle_day || "1", 10) || 1));
-  return `${String(nextYear).padStart(4, "0")}-${String(nextMonth).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-}
-
-function getEffectiveMonthlyUsedChars(customer) {
-  if (!customer) return 0;
-  if (customer.billing_period && customer.billing_period !== getCurrentBillingPeriod(customer.billing_cycle_day)) return 0;
-  return Number(customer.used_chars || 0);
-}
-
-function getMonthlyRemainingChars(customer) {
-  return Math.max(0, Number(customer?.quota_chars || 0) - getEffectiveMonthlyUsedChars(customer));
-}
-
-function getExtraRemainingChars(customer) {
-  return Math.max(0, Number(customer?.extra_quota_chars || 0) - Number(customer?.extra_used_chars || 0));
-}
-
-function getRemainingChars(customer) {
-  return getMonthlyRemainingChars(customer) + getExtraRemainingChars(customer);
-}
-
-function countChargeableChars(text) {
-  return Array.from(text || "").length;
+function defaultExpiryDate() {
+  return addMonthsToDateString(getBangkokDateString(), 1);
 }
 
 function formatDate(value) {
   if (!value) return "未设置";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toISOString().slice(0, 10);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+  return getBangkokDateString(date);
+}
+
+function normalizeExpiryDate(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return `${text}T23:59:59+07:00`;
+  }
+  return text;
+}
+
+function formatDateInput(value) {
+  if (!value) return "";
+  return formatDate(value);
+}
+
+function parseNonNegativeInteger(value) {
+  return Math.max(0, Number.parseInt(value || "0", 10) || 0);
 }
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString("en-US");
+}
+
+function countChargeableChars(text) {
+  return Array.from(text || "").length;
 }
 
 function escapeHtml(value) {
@@ -358,6 +282,116 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function getEffectiveMonthlyUsedChars(user) {
+  if (!user) return 0;
+  if (user.billing_period && user.billing_period !== getCurrentBillingPeriod()) return 0;
+  return Number(user.monthly_used_chars || 0);
+}
+
+function getMonthlyRemainingChars(user) {
+  return Math.max(0, Number(user?.monthly_quota_chars || 0) - getEffectiveMonthlyUsedChars(user));
+}
+
+function getExtraRemainingChars(user) {
+  return Math.max(0, Number(user?.extra_quota_chars || 0) - Number(user?.extra_used_chars || 0));
+}
+
+function isUserExpired(user) {
+  if (!user?.expires_at) return true;
+  return new Date(user.expires_at).getTime() <= Date.now();
+}
+
+function getRemainingChars(user) {
+  if (!user || isUserExpired(user) || user.status !== "active") return 0;
+  return getMonthlyRemainingChars(user) + getExtraRemainingChars(user);
+}
+
+function isUserUsable(user) {
+  if (!user) return { ok: false, reason: "not_found" };
+  if (user.status !== "active") return { ok: false, reason: "status" };
+  if (isUserExpired(user)) return { ok: false, reason: "expired" };
+  if (getRemainingChars(user) <= 0) return { ok: false, reason: "quota" };
+  return { ok: true, reason: "" };
+}
+
+function getCached(key) {
+  if (!translationCache.has(key)) return null;
+
+  const value = translationCache.get(key);
+  translationCache.delete(key);
+  translationCache.set(key, value);
+  return value;
+}
+
+function setCache(key, value) {
+  if (translationCache.has(key)) translationCache.delete(key);
+
+  while (translationCache.size >= CACHE_MAX_SIZE) {
+    translationCache.delete(translationCache.keys().next().value);
+  }
+
+  translationCache.set(key, value);
+}
+
+async function findUserByLineUserId(lineUserId) {
+  if (!lineUserId) return null;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("line_user_id", lineUserId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Load user failed:", {
+      error: error.message,
+      lineUserId,
+      time: new Date().toISOString(),
+    });
+    return null;
+  }
+
+  return data || null;
+}
+
+async function touchUser(userId) {
+  if (!userId) return;
+
+  const { error } = await supabase
+    .from("users")
+    .update({ last_active_at: new Date().toISOString() })
+    .eq("id", userId);
+
+  if (error) {
+    console.warn("Touch user failed:", {
+      error: error.message,
+      userId,
+      time: new Date().toISOString(),
+    });
+  }
+}
+
+async function chargeUserUsage(userId, chargedChars) {
+  if (chargedChars <= 0) return true;
+
+  const { data, error } = await supabase.rpc("increment_user_usage", {
+    p_user_id: userId,
+    p_chars: chargedChars,
+  });
+
+  if (!error) {
+    return Array.isArray(data) ? data.length > 0 : Boolean(data);
+  }
+
+  console.warn("RPC increment_user_usage failed:", {
+    error: error.message,
+    userId,
+    chargedChars,
+    time: new Date().toISOString(),
+  });
+  return false;
 }
 
 function adminTokenFromRequest(req) {
@@ -499,66 +533,37 @@ function requireAdmin(req, res, next) {
   res.status(401).send(renderAdminLogin(req.query.error || ""));
 }
 
-function parseNonNegativeInteger(value) {
-  return Math.max(0, Number.parseInt(value || "0", 10) || 0);
-}
-
-function normalizeExpiryDate(value) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    return `${text}T23:59:59+07:00`;
-  }
-  return text;
-}
-
-function formatDateInput(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
-
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: BILLING_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const year = parts.find((part) => part.type === "year")?.value || "";
-  const month = parts.find((part) => part.type === "month")?.value || "";
-  const day = parts.find((part) => part.type === "day")?.value || "";
-  return year && month && day ? `${year}-${month}-${day}` : String(value).slice(0, 10);
-}
-
-function normalizeCustomerInput(body) {
-  const billingCycleDay = Math.min(28, Math.max(1, Number.parseInt(body.billing_cycle_day || "1", 10) || 1));
-
+function normalizeUserInput(body) {
   return {
+    line_user_id: String(body.line_user_id || "").trim(),
     name: String(body.name || "").trim(),
-    activation_code: String(body.activation_code || "").trim(),
-    activation_code_enabled: body.activation_code_enabled === "on",
     status: String(body.status || "active").trim(),
-    quota_chars: parseNonNegativeInteger(body.quota_chars),
-    used_chars: parseNonNegativeInteger(body.used_chars),
+    mode: String(body.mode || "bilingual").trim(),
+    from_lang: normalizeCode(body.from_lang || "zh"),
+    to_lang: normalizeCode(body.to_lang || "th"),
+    monthly_quota_chars: parseNonNegativeInteger(body.monthly_quota_chars),
+    monthly_used_chars: parseNonNegativeInteger(body.monthly_used_chars),
     extra_quota_chars: parseNonNegativeInteger(body.extra_quota_chars),
     extra_used_chars: parseNonNegativeInteger(body.extra_used_chars),
-    billing_cycle_day: billingCycleDay,
-    billing_period: getCurrentBillingPeriod(billingCycleDay),
-    expires_at: normalizeExpiryDate(body.expires_at),
+    billing_period: getCurrentBillingPeriod(),
+    expires_at: normalizeExpiryDate(body.expires_at || defaultExpiryDate()),
     notes: String(body.notes || "").trim() || null,
   };
 }
 
-function validateCustomerInput(input) {
-  const validStatuses = new Set(["active", "trial", "paused", "expired", "cancelled"]);
+function validateUserInput(input) {
+  const validStatuses = new Set(["active", "paused"]);
+  const validModes = new Set(["bilingual", "trilingual"]);
 
-  if (!input.name) return "客户名称不能为空。";
-  if (!input.activation_code) return "激活码不能为空。";
-  if (!validStatuses.has(input.status)) return "客户状态不正确。";
+  if (!input.line_user_id) return "USERID 不能为空。";
+  if (!input.name) return "用户名不能为空。";
+  if (!validStatuses.has(input.status)) return "用户状态不正确。";
+  if (!validModes.has(input.mode)) return "翻译模式不正确。";
   if (!input.expires_at || Number.isNaN(new Date(input.expires_at).getTime())) {
-    return "到期日期格式不正确，例如：2026-06-12";
+    return "到期日期格式不正确，例如：2026-06-15";
   }
-  if (input.used_chars > input.quota_chars) return "已用额度不能大于总额度。";
-  if (input.extra_used_chars > input.extra_quota_chars) return "额外已用额度不能大于额外总额度。";
+  if (input.monthly_used_chars > input.monthly_quota_chars) return "月度已用不能大于月度额度。";
+  if (input.extra_used_chars > input.extra_quota_chars) return "加油包已用不能大于加油包额度。";
 
   return "";
 }
@@ -571,121 +576,32 @@ function buildAdminRedirect(token, message) {
   return query ? `/admin?${query}` : "/admin";
 }
 
-function parseGroupId(conversationId) {
-  const match = String(conversationId || "").match(/^group:(.+)$/);
-  return match ? match[1] : "";
-}
-
-async function getGroupSummary(groupId) {
-  if (!groupId) return null;
-
-  const cached = groupSummaryCache.get(groupId);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
-
-  try {
-    const response = await fetch(
-      `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/summary`,
-      {
-        headers: {
-          authorization: `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
-        },
-      }
-    );
-
-    if (!response.ok) {
-      console.warn("Get LINE group summary failed:", {
-        groupId,
-        status: response.status,
-        time: new Date().toISOString(),
-      });
-      groupSummaryCache.set(groupId, {
-        value: null,
-        expiresAt: Date.now() + GROUP_SUMMARY_NEGATIVE_CACHE_TTL_MS,
-      });
-      return null;
-    }
-
-    const data = await response.json();
-    const summary = {
-      groupName: data.groupName || "",
-      pictureUrl: data.pictureUrl || "",
-    };
-    groupSummaryCache.set(groupId, {
-      value: summary,
-      expiresAt: Date.now() + GROUP_SUMMARY_CACHE_TTL_MS,
-    });
-    return summary;
-  } catch (error) {
-    console.warn("Get LINE group summary error:", {
-      groupId,
-      error: error.message,
-      time: new Date().toISOString(),
-    });
-    groupSummaryCache.set(groupId, {
-      value: null,
-      expiresAt: Date.now() + GROUP_SUMMARY_NEGATIVE_CACHE_TTL_MS,
-    });
-    return null;
-  }
-}
-
-async function enrichActivationDisplayNames(activations) {
-  const visibleActivations = (activations || []).slice(0, 50);
-  await Promise.all(
-    visibleActivations.map(async (activation) => {
-      if (activation.source_type !== "group") return;
-      const groupId = parseGroupId(activation.conversation_id);
-      const summary = await getGroupSummary(groupId);
-      if (summary?.groupName) {
-        activation.display_name = summary.groupName;
-        activation.picture_url = summary.pictureUrl;
-      }
-    })
-  );
-}
-
 async function loadAdminData() {
-  const [{ data: customers, error: customersError }, { data: activations, error: activationsError }] =
+  const now = new Date().toISOString();
+  const [{ data: activeUsers, error: activeError }, { data: expiredUsers, error: expiredError }] =
     await Promise.all([
-      supabase.from("customers").select("*").order("created_at", { ascending: false }),
       supabase
-        .from("activations")
-        .select(
-          "id, customer_id, conversation_id, source_type, owner_user_id, enabled, mode, from_lang, to_lang, last_active_at, customer:customers(name, activation_code)"
-        )
-        .order("last_active_at", { ascending: false, nullsFirst: false }),
+        .from("users")
+        .select("*")
+        .eq("status", "active")
+        .gte("expires_at", now)
+        .order("expires_at", { ascending: true })
+        .limit(20),
+      supabase
+        .from("users")
+        .select("*")
+        .or(`expires_at.lt.${now},status.eq.paused`)
+        .order("expires_at", { ascending: false })
+        .limit(20),
     ]);
 
-  if (customersError) throw customersError;
-  if (activationsError) throw activationsError;
-
-  await enrichActivationDisplayNames(activations || []);
+  if (activeError) throw activeError;
+  if (expiredError) throw expiredError;
 
   return {
-    customers: customers || [],
-    activations: activations || [],
+    activeUsers: activeUsers || [],
+    expiredUsers: expiredUsers || [],
   };
-}
-
-function summarizeActivations(activations) {
-  const summary = new Map();
-
-  for (const activation of activations) {
-    const item = summary.get(activation.customer_id) || {
-      count: 0,
-      enabledCount: 0,
-      lastActiveAt: "",
-      sourceTypes: new Set(),
-    };
-
-    item.count += 1;
-    if (activation.enabled) item.enabledCount += 1;
-    if (!item.lastActiveAt && activation.last_active_at) item.lastActiveAt = activation.last_active_at;
-    item.sourceTypes.add(activation.source_type);
-    summary.set(activation.customer_id, item);
-  }
-
-  return summary;
 }
 
 function renderAdminLogin(errorMessage) {
@@ -732,138 +648,74 @@ function renderAdminLogin(errorMessage) {
 </html>`;
 }
 
-function renderAdminPage({ customers, activations, token, message, adminEmail }) {
-  const activationSummary = summarizeActivations(activations);
-  const activationRows = activations
-    .slice(0, 50)
-    .map(
-      (activation) => `<tr>
-        <td>
-          <strong>${escapeHtml(activation.customer?.name || "-")}</strong><br>
-          <code>${escapeHtml(activation.customer?.activation_code || activation.customer_id)}</code>
-        </td>
-        <td>${escapeHtml(activation.source_type)}</td>
-        <td>
-          ${activation.display_name ? `<strong>${escapeHtml(activation.display_name)}</strong><br>` : ""}
-          <code>${escapeHtml(activation.conversation_id)}</code>
-        </td>
-        <td><code>${escapeHtml(activation.owner_user_id || "-")}</code></td>
-        <td>${escapeHtml(activation.mode)}</td>
-        <td>${escapeHtml(activation.from_lang)} -> ${escapeHtml(activation.to_lang)}</td>
-        <td>${activation.enabled ? "开启" : "关闭"}</td>
-        <td>${escapeHtml(formatDate(activation.last_active_at))}</td>
-        <td class="row-actions">
-          <form method="post" action="/admin/activations/${escapeHtml(activation.id)}/toggle">
-            <input type="hidden" name="token" value="${escapeHtml(token)}">
-            <input type="hidden" name="enabled" value="${activation.enabled ? "false" : "true"}">
-            <button type="submit" class="secondary">${activation.enabled ? "关闭" : "开启"}</button>
-          </form>
-          <form method="post" action="/admin/activations/${escapeHtml(activation.id)}/delete" onsubmit="return confirm('确定解绑这条记录吗？');">
-            <input type="hidden" name="token" value="${escapeHtml(token)}">
-            <button type="submit" class="danger">解绑</button>
-          </form>
-        </td>
-      </tr>`
-    )
-    .join("");
-
-  const customerRows = customers
-    .map((customer) => {
-      const item = activationSummary.get(customer.id) || {
-        count: 0,
-        enabledCount: 0,
-        lastActiveAt: "",
-        sourceTypes: new Set(),
-      };
-      const monthlyUsed = getEffectiveMonthlyUsedChars(customer);
-      const monthlyRemaining = getMonthlyRemainingChars(customer);
-      const extraRemaining = getExtraRemainingChars(customer);
-      const remaining = getRemainingChars(customer);
-      const monthlyUsagePercent =
-        Number(customer.quota_chars || 0) > 0
-          ? Math.min(100, Math.round((monthlyUsed / Number(customer.quota_chars || 0)) * 100))
-          : 0;
-      const extraUsagePercent =
-        Number(customer.extra_quota_chars || 0) > 0
-          ? Math.min(
-              100,
-              Math.round((Number(customer.extra_used_chars || 0) / Number(customer.extra_quota_chars || 0)) * 100)
-            )
-          : 0;
-      const statusOptions = ["active", "trial", "paused", "expired", "cancelled"]
-        .map(
-          (status) => `<option value="${status}" ${customer.status === status ? "selected" : ""}>${status}</option>`
-        )
+function renderUserRows(users, token) {
+  return (users || [])
+    .map((user) => {
+      const monthlyUsed = getEffectiveMonthlyUsedChars(user);
+      const monthlyRemaining = isUserExpired(user) ? 0 : getMonthlyRemainingChars(user);
+      const extraRemaining = isUserExpired(user) ? 0 : getExtraRemainingChars(user);
+      const totalRemaining = getRemainingChars(user);
+      const statusOptions = ["active", "paused"]
+        .map((status) => `<option value="${status}" ${user.status === status ? "selected" : ""}>${status}</option>`)
         .join("");
-      const currentPeriod = getCurrentBillingPeriod(customer.billing_cycle_day);
-      const periodStart = formatBillingPeriodStart(currentPeriod, customer.billing_cycle_day);
-      const nextReset = formatNextBillingReset(customer);
+      const modeOptions = ["bilingual", "trilingual"]
+        .map((mode) => `<option value="${mode}" ${user.mode === mode ? "selected" : ""}>${mode}</option>`)
+        .join("");
 
-      return `<details class="customer">
+      return `<details class="user">
         <summary>
           <span class="summary-main">
-            <strong>${escapeHtml(customer.name)}</strong>
-            <code>${escapeHtml(customer.activation_code)}</code>
-            <span class="badge">${escapeHtml(customer.status)}</span>
+            <strong>${escapeHtml(user.name)}</strong>
+            <code>${escapeHtml(user.line_user_id)}</code>
+            <span class="badge ${isUserExpired(user) ? "danger-badge" : ""}">${isUserExpired(user) ? "expired" : escapeHtml(user.status)}</span>
           </span>
           <span class="summary-stats">
-            到期 ${escapeHtml(formatDateInput(customer.expires_at)) || "未设置"} · 月剩 ${formatNumber(monthlyRemaining)} · 额外剩 ${formatNumber(extraRemaining)} · 总剩 ${formatNumber(remaining)} · 绑定 ${item.count}
+            到期 ${escapeHtml(formatDateInput(user.expires_at))} · 月剩 ${formatNumber(monthlyRemaining)} · 加油包剩 ${formatNumber(extraRemaining)} · 总剩 ${formatNumber(totalRemaining)}
           </span>
         </summary>
 
-        <div class="customer-body">
+        <div class="user-body">
           <div class="quota-strip">
             <div>
-              <b>月套餐</b>
-              <span>${formatNumber(customer.quota_chars)} / 已用 ${formatNumber(monthlyUsed)} / 剩 ${formatNumber(monthlyRemaining)}</span>
-              <div class="meter"><span style="width:${monthlyUsagePercent}%"></span></div>
+              <b>月度套餐</b>
+              <span>${formatNumber(user.monthly_quota_chars)} / 已用 ${formatNumber(monthlyUsed)} / 剩 ${formatNumber(monthlyRemaining)}</span>
             </div>
             <div>
               <b>加油包</b>
-              <span>${formatNumber(customer.extra_quota_chars || 0)} / 已用 ${formatNumber(customer.extra_used_chars || 0)} / 剩 ${formatNumber(extraRemaining)}</span>
-              <div class="meter"><span style="width:${extraUsagePercent}%"></span></div>
+              <span>${formatNumber(user.extra_quota_chars || 0)} / 已用 ${formatNumber(user.extra_used_chars || 0)} / 可用剩余 ${formatNumber(extraRemaining)}</span>
             </div>
             <div>
-              <b>使用情况</b>
-              <span>总剩 ${formatNumber(remaining)} · 当前账期 ${escapeHtml(periodStart)} · 下次重置 ${escapeHtml(nextReset)} · 最近 ${escapeHtml(formatDate(item.lastActiveAt))}</span>
+              <b>账号</b>
+              <span>过期后月度套餐和加油包都不可用 · 最近使用 ${escapeHtml(formatDate(user.last_active_at))}</span>
             </div>
           </div>
 
-          <form method="post" action="/admin/customers/${escapeHtml(customer.id)}">
+          <form method="post" action="/admin/users/${escapeHtml(user.id)}">
             <input type="hidden" name="token" value="${escapeHtml(token)}">
-            <input type="hidden" name="billing_period" value="${escapeHtml(getCurrentBillingPeriod(customer.billing_cycle_day))}">
             <div class="grid">
-              <label>客户名称<input name="name" value="${escapeHtml(customer.name)}"></label>
-              <label>激活码<input name="activation_code" value="${escapeHtml(customer.activation_code)}"></label>
+              <label>USERID<input name="line_user_id" value="${escapeHtml(user.line_user_id)}"></label>
+              <label>用户名<input name="name" value="${escapeHtml(user.name)}"></label>
               <label>状态<select name="status">${statusOptions}</select></label>
-              <label>到期日期<input name="expires_at" type="date" value="${escapeHtml(formatDateInput(customer.expires_at))}"></label>
-              <label>月套餐额度<input name="quota_chars" type="number" min="0" step="1" value="${escapeHtml(customer.quota_chars)}"></label>
-              <label>本月已用<input name="used_chars" type="number" min="0" step="1" value="${escapeHtml(monthlyUsed)}"></label>
-              <label>额外总额度<input name="extra_quota_chars" type="number" min="0" step="1" value="${escapeHtml(customer.extra_quota_chars || 0)}"></label>
-              <label>额外已用<input name="extra_used_chars" type="number" min="0" step="1" value="${escapeHtml(customer.extra_used_chars || 0)}"></label>
-              <label>账期日<input name="billing_cycle_day" type="number" min="1" max="28" step="1" value="${escapeHtml(customer.billing_cycle_day || 1)}"></label>
-              <label class="check"><input name="activation_code_enabled" type="checkbox" ${customer.activation_code_enabled ? "checked" : ""}> 激活码启用</label>
-              <label class="wide">备注<input name="notes" value="${escapeHtml(customer.notes || "")}"></label>
+              <label>模式<select name="mode">${modeOptions}</select></label>
+              <label>到期日期<input name="expires_at" type="date" value="${escapeHtml(formatDateInput(user.expires_at))}"></label>
+              <label>源语言<input name="from_lang" value="${escapeHtml(user.from_lang || "zh")}"></label>
+              <label>目标语言<input name="to_lang" value="${escapeHtml(user.to_lang || "th")}"></label>
+              <label>月度额度<input name="monthly_quota_chars" type="number" min="0" step="1" value="${escapeHtml(user.monthly_quota_chars)}"></label>
+              <label>月度已用<input name="monthly_used_chars" type="number" min="0" step="1" value="${escapeHtml(monthlyUsed)}"></label>
+              <label>加油包额度<input name="extra_quota_chars" type="number" min="0" step="1" value="${escapeHtml(user.extra_quota_chars || 0)}"></label>
+              <label>加油包已用<input name="extra_used_chars" type="number" min="0" step="1" value="${escapeHtml(user.extra_used_chars || 0)}"></label>
+              <label class="wide">备注<input name="notes" value="${escapeHtml(user.notes || "")}"></label>
             </div>
-            <p><button type="submit">保存客户</button></p>
+            <p><button type="submit">保存用户</button></p>
           </form>
-
-          <div class="actions">
-            <form method="post" action="/admin/customers/${escapeHtml(customer.id)}/topup">
-              <input type="hidden" name="token" value="${escapeHtml(token)}">
-              <label>加购额度<input name="topup_chars" type="number" min="1" step="1" placeholder="例如 200000"></label>
-              <label>备注<input name="topup_note" placeholder="收款/订单备注"></label>
-              <button type="submit">增加加油包</button>
-            </form>
-            <form method="post" action="/admin/customers/${escapeHtml(customer.id)}/reset-monthly">
-              <input type="hidden" name="token" value="${escapeHtml(token)}">
-              <button type="submit" class="secondary">重置本月已用</button>
-            </form>
-          </div>
         </div>
       </details>`;
     })
     .join("");
+}
+
+function renderAdminPage({ activeUsers, expiredUsers, token, message, adminEmail }) {
+  const defaultExpiry = defaultExpiryDate();
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -879,43 +731,33 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
     h1 { margin: 0; font-size: 22px; }
     h2 { font-size: 18px; margin: 24px 0 12px; }
     form { margin: 0; }
-    .panel, .customer { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; margin-bottom: 10px; }
+    .panel, .user { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; margin-bottom: 10px; }
     .panel { padding: 16px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 12px; }
     .wide { grid-column: span 2; }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #4b5870; }
     input, select { box-sizing: border-box; width: 100%; padding: 9px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; background: #fff; }
-    .input-with-button { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
     code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
     button { padding: 9px 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; }
     button.secondary { background: #536078; }
-    button.danger { background: #c2410c; }
     summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; cursor: pointer; }
     summary::-webkit-details-marker { display: none; }
     .summary-main, .summary-stats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .summary-stats { color: #536078; font-size: 13px; justify-content: flex-end; }
     .badge { background: #e8f2ff; color: #175cd3; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
-    .customer-body { border-top: 1px solid #e8edf3; padding: 14px; }
+    .danger-badge { background: #fff1f0; color: #a8071a; }
+    .user-body { border-top: 1px solid #e8edf3; padding: 14px; }
     .quota-strip { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; margin-bottom: 14px; }
     .quota-strip div { background: #f8fafc; border: 1px solid #e8edf3; border-radius: 6px; padding: 10px; }
     .quota-strip b, .quota-strip span { display: block; }
     .quota-strip span { color: #536078; font-size: 13px; margin-top: 4px; }
-    .actions { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; border-top: 1px solid #e8edf3; margin-top: 14px; padding-top: 14px; }
-    .actions form { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+    .renew-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 12px; align-items: end; }
     .check { justify-content: end; flex-direction: row; align-items: center; }
     .check input { width: auto; }
-    .meter { height: 8px; background: #edf1f6; border-radius: 999px; overflow: hidden; margin-top: 14px; }
-    .meter span { display: block; height: 100%; background: #2da44e; }
     .meta { color: #536078; font-size: 13px; margin: 10px 0 0; }
     .message { background: #ecfdf3; border: 1px solid #abefc6; color: #067647; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
-    .error { background: #fff1f0; border-color: #ffccc7; color: #a8071a; }
-    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; overflow: hidden; }
-    th, td { text-align: left; padding: 10px; border-bottom: 1px solid #e8edf3; font-size: 13px; vertical-align: top; }
-    th { background: #f8fafc; color: #4b5870; }
-    .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .row-actions form { display: inline-flex; }
     @media (max-width: 860px) {
-      .grid, .quota-strip { grid-template-columns: 1fr; }
+      .grid, .quota-strip, .renew-grid { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
       summary { align-items: flex-start; flex-direction: column; }
       .summary-stats { justify-content: flex-start; }
@@ -927,65 +769,97 @@ function renderAdminPage({ customers, activations, token, message, adminEmail })
   <header><h1>LINE 翻译机器人管理</h1><p class="meta">当前管理员：${escapeHtml(adminEmail || "unknown")} · <a href="/admin/logout">退出</a></p></header>
   <main>
     ${message ? `<div class="message">${escapeHtml(message)}</div>` : ""}
+
     <section class="panel">
-      <h2>新建客户/激活码</h2>
-      <form method="post" action="/admin/customers">
+      <h2>新增用户</h2>
+      <form method="post" action="/admin/users">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <div class="grid">
-          <label>客户名称<input name="name" placeholder="客户或公司名称"></label>
-          <label>激活码
-            <span class="input-with-button">
-              <input id="new-activation-code" name="activation_code" placeholder="LT-2026-K7Q9-X4M2">
-              <button type="button" class="secondary" id="generate-activation-code">生成</button>
-            </span>
-          </label>
+          <label>USERID<input name="line_user_id" placeholder="Uxxxxxxxxxxxxxxxx" required></label>
+          <label>用户名<input name="name" placeholder="后台自定义名称" required></label>
           <label>状态
             <select name="status">
               <option value="active">active</option>
-              <option value="trial">trial</option>
               <option value="paused">paused</option>
             </select>
           </label>
-          <label>到期日期<input name="expires_at" type="date"></label>
-          <label>月套餐额度<input name="quota_chars" type="number" min="0" step="1" value="100000"></label>
-          <label>本月已用<input name="used_chars" type="number" min="0" step="1" value="0"></label>
-          <label>额外总额度<input name="extra_quota_chars" type="number" min="0" step="1" value="0"></label>
-          <label>额外已用<input name="extra_used_chars" type="number" min="0" step="1" value="0"></label>
-          <label>账期日<input name="billing_cycle_day" type="number" min="1" max="28" step="1" value="1"></label>
-          <input type="hidden" name="billing_period" value="${escapeHtml(getCurrentBillingPeriod())}">
-          <label class="check"><input name="activation_code_enabled" type="checkbox" checked> 激活码启用</label>
-          <label>备注<input name="notes" placeholder="收款/套餐/客户备注"></label>
+          <input type="hidden" name="mode" value="bilingual">
+          <input type="hidden" name="from_lang" value="zh">
+          <input type="hidden" name="to_lang" value="th">
+          <label>到期日期
+            <select class="expiry-preset" data-target="new-expires-at">
+              <option value="1" selected>1 个月</option>
+              <option value="3">3 个月</option>
+              <option value="6">6 个月</option>
+              <option value="12">12 个月</option>
+              <option value="custom">自定义</option>
+            </select>
+            <input id="new-expires-at" name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}">
+          </label>
+          <label>月度额度<input name="monthly_quota_chars" type="number" min="0" step="1" value="100000"></label>
+          <label>月度已用<input name="monthly_used_chars" type="number" min="0" step="1" value="0"></label>
+          <label>加油包额度<input name="extra_quota_chars" type="number" min="0" step="1" value="0"></label>
+          <label>加油包已用<input name="extra_used_chars" type="number" min="0" step="1" value="0"></label>
+          <label class="wide">备注<input name="notes" placeholder="收款/套餐/客户备注"></label>
         </div>
-        <p><button type="submit">创建客户</button></p>
+        <p><button type="submit">创建用户</button></p>
       </form>
     </section>
 
-    <h2>客户列表</h2>
-    ${customerRows || '<section class="panel">暂无客户。</section>'}
+    <section class="panel">
+      <h2>续费模块</h2>
+      <form method="post" action="/admin/renewals">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <div class="renew-grid">
+          <label>USERID<input name="line_user_id" placeholder="输入需要续费的 USERID" required></label>
+          <label>续费类型
+            <select name="renewal_type" id="renewal-type">
+              <option value="monthly">月度续费</option>
+              <option value="topup">加油包充值</option>
+            </select>
+          </label>
+          <label>续费月数
+            <select name="months">
+              <option value="1">1 个月</option>
+              <option value="3">3 个月</option>
+              <option value="6">6 个月</option>
+              <option value="12">12 个月</option>
+            </select>
+          </label>
+          <label>字符数<input name="chars" type="number" min="0" step="1" value="100000"></label>
+          <label class="check"><input name="reset_monthly_used" type="checkbox" checked> 月度续费时清零本月已用</label>
+          <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
+        </div>
+        <p class="meta">月度续费会延长账号有效期；加油包充值只增加额外字符，不改变到期日。账号过期后，加油包余额也不可用。</p>
+        <p><button type="submit">提交续费</button></p>
+      </form>
+    </section>
 
-    <h2>最近绑定聊天环境</h2>
-    <table>
-      <thead><tr><th>客户</th><th>类型</th><th>Conversation ID</th><th>来源用户</th><th>模式</th><th>语言</th><th>开关</th><th>最后活跃</th><th>操作</th></tr></thead>
-      <tbody>${activationRows || '<tr><td colspan="9">暂无绑定记录。</td></tr>'}</tbody>
-    </table>
+    <h2>有效用户（即将到期优先，前 20 条）</h2>
+    ${renderUserRows(activeUsers, token) || '<section class="panel">暂无有效用户。</section>'}
+
+    <h2>过期用户（刚刚过期优先，前 20 条）</h2>
+    ${renderUserRows(expiredUsers, token) || '<section class="panel">暂无过期用户。</section>'}
   </main>
   <script>
     (() => {
-      const input = document.getElementById("new-activation-code");
-      const button = document.getElementById("generate-activation-code");
-      if (!input || !button) return;
-
-      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-      const randomBlock = (length) => {
-        const bytes = new Uint8Array(length);
-        crypto.getRandomValues(bytes);
-        return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+      const today = new Date();
+      const pad = (value) => String(value).padStart(2, "0");
+      const formatDate = (date) => [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join("-");
+      const addMonths = (months) => {
+        const next = new Date(today);
+        const day = next.getDate();
+        next.setMonth(next.getMonth() + Number(months || 1));
+        if (next.getDate() !== day) next.setDate(0);
+        return formatDate(next);
       };
 
-      button.addEventListener("click", () => {
-        input.value = ["LT", new Date().getFullYear(), randomBlock(4), randomBlock(4)].join("-");
-        input.focus();
-        input.select();
+      document.querySelectorAll(".expiry-preset").forEach((select) => {
+        select.addEventListener("change", () => {
+          const target = document.getElementById(select.dataset.target);
+          if (!target || select.value === "custom") return;
+          target.value = addMonths(select.value);
+        });
       });
     })();
   </script>
@@ -997,314 +871,10 @@ function redactWebhookBody(body) {
   const clone = JSON.parse(JSON.stringify(body));
 
   for (const event of clone.events || []) {
-    const text = event?.message?.type === "text" ? event.message.text : "";
-    if (text && isActivateCommand(text)) {
-      event.message.text = "[REDACTED_ACTIVATION_COMMAND]";
-    }
+    if (event?.source?.userId) event.source.userId = "[USER_ID]";
   }
 
   return clone;
-}
-
-function getCached(key) {
-  if (!translationCache.has(key)) return null;
-
-  const value = translationCache.get(key);
-  translationCache.delete(key);
-  translationCache.set(key, value);
-  return value;
-}
-
-function setCache(key, value) {
-  if (translationCache.has(key)) {
-    translationCache.delete(key);
-  }
-
-  while (translationCache.size >= CACHE_MAX_SIZE) {
-    translationCache.delete(translationCache.keys().next().value);
-  }
-
-  translationCache.set(key, value);
-}
-
-async function getActivationState(conversationId) {
-  if (!conversationId) return null;
-
-  const { data, error } = await supabase
-    .from("activations")
-    .select("*, customer:customers(*)")
-    .eq("conversation_id", conversationId)
-    .maybeSingle();
-
-  if (error) {
-    console.error("Load activation failed:", {
-      error: error.message,
-      conversationId,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-
-  if (!data) return null;
-  return { activation: data, customer: data.customer };
-}
-
-function getOwnerUserIdFromConversation(conversation) {
-  if (conversation?.sourceType !== "user") return null;
-  const match = String(conversation.id || "").match(/^user:(.+)$/);
-  return match ? match[1] : null;
-}
-
-async function getPrivateActivationForCustomer(customerId) {
-  if (!customerId) return null;
-
-  const { data, error } = await supabase
-    .from("activations")
-    .select("*")
-    .eq("customer_id", customerId)
-    .eq("source_type", "user")
-    .order("created_at", { ascending: true })
-    .limit(1);
-
-  if (error) throw error;
-  return data?.[0] || null;
-}
-
-async function switchPrivateActivationCustomer(activation, customerId, ownerUserId) {
-  const oldCustomerId = activation.customer_id;
-  const patch = {
-    customer_id: customerId,
-    owner_user_id: ownerUserId,
-    enabled: true,
-    updated_at: new Date().toISOString(),
-    last_active_at: new Date().toISOString(),
-  };
-
-  const { data, error } = await supabase
-    .from("activations")
-    .update(patch)
-    .eq("id", activation.id)
-    .select("*, customer:customers(*)")
-    .single();
-
-  if (error) throw error;
-
-  if (oldCustomerId && oldCustomerId !== customerId && ownerUserId) {
-    const { error: migrateError } = await supabase
-      .from("activations")
-      .update({
-        customer_id: customerId,
-        owner_user_id: ownerUserId,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("customer_id", oldCustomerId)
-      .or(`owner_user_id.eq.${ownerUserId},owner_user_id.is.null`)
-      .in("source_type", ["group", "room"]);
-
-    if (migrateError) {
-      console.warn("Migrate owned group activations after key switch failed:", {
-        error: migrateError.message,
-        oldCustomerId,
-        newCustomerId: customerId,
-        ownerUserId,
-        time: new Date().toISOString(),
-      });
-    }
-  }
-
-  return { activation: data, customer: data.customer };
-}
-
-async function createActivationState(conversation, customerId, template = {}) {
-  const row = {
-    ...buildActivationFromTemplate(conversation, template),
-    customer_id: customerId,
-    owner_user_id: template.owner_user_id ?? getOwnerUserIdFromConversation(conversation),
-    last_active_at: new Date().toISOString(),
-  };
-
-  const { data, error } = await supabase
-    .from("activations")
-    .insert(row)
-    .select("*, customer:customers(*)")
-    .single();
-
-  if (error) throw error;
-  return { activation: data, customer: data.customer };
-}
-
-async function getEffectiveActivationState(event, conversation) {
-  const currentState = await getActivationState(conversation.id);
-  if (currentState || conversation.sourceType === "user") return currentState;
-
-  const userId = event.source?.userId;
-  if (!userId) {
-    console.warn("Cannot inherit private activation without sender userId:", {
-      conversationId: conversation.id,
-      sourceType: conversation.sourceType,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-
-  const privateState = await getActivationState(`user:${userId}`);
-  if (!privateState) {
-    console.log("No private activation found for group sender:", {
-      conversationId: conversation.id,
-      sourceType: conversation.sourceType,
-      userId,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-
-  if (!privateState.activation.enabled) {
-    console.warn("Private activation cannot be inherited because it is disabled:", {
-      conversationId: conversation.id,
-      sourceType: conversation.sourceType,
-      userId,
-      activationId: privateState.activation.id,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-
-  const customerCheck = isCustomerUsable(privateState.customer);
-  if (!customerCheck.ok) {
-    console.warn("Private activation cannot be inherited because customer is not usable:", {
-      conversationId: conversation.id,
-      sourceType: conversation.sourceType,
-      userId,
-      customerId: privateState.customer?.id,
-      reason: customerCheck.reason,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-
-  try {
-    const inheritedState = await createActivationState(
-      conversation,
-      privateState.customer.id,
-      {
-        ...privateState.activation,
-        owner_user_id: privateState.activation.owner_user_id || userId,
-      }
-    );
-    console.log("Inherited private activation for conversation:", {
-      conversationId: conversation.id,
-      sourceType: conversation.sourceType,
-      userId,
-      customerId: privateState.customer.id,
-      time: new Date().toISOString(),
-    });
-    return inheritedState;
-  } catch (error) {
-    const duplicateConversation =
-      error?.code === "23505" || /duplicate key|unique/i.test(error?.message || "");
-
-    if (duplicateConversation) {
-      return getActivationState(conversation.id);
-    }
-
-    console.error("Create inherited activation failed:", {
-      error: error.message,
-      conversationId: conversation.id,
-      userId,
-      customerId: privateState.customer.id,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-}
-
-async function touchActivation(activationId) {
-  const { error } = await supabase
-    .from("activations")
-    .update({ last_active_at: new Date().toISOString() })
-    .eq("id", activationId);
-
-  if (error) {
-    console.warn("Touch activation failed:", {
-      error: error.message,
-      activationId,
-      time: new Date().toISOString(),
-    });
-  }
-}
-
-async function updateActivation(activationId, patch) {
-  const { data, error } = await supabase
-    .from("activations")
-    .update({
-      ...patch,
-      updated_at: new Date().toISOString(),
-      last_active_at: new Date().toISOString(),
-    })
-    .eq("id", activationId)
-    .select()
-    .single();
-
-  if (error) throw error;
-  return data;
-}
-
-async function chargeCustomerUsage(customerId, chargedChars) {
-  if (chargedChars <= 0) return true;
-
-  const { data, error } = await supabase.rpc("increment_customer_usage", {
-    p_customer_id: customerId,
-    p_chars: chargedChars,
-  });
-
-  if (!error) {
-    return Array.isArray(data) ? data.length > 0 : Boolean(data);
-  }
-
-  console.warn("RPC increment_customer_usage failed, falling back to read/update:", {
-    error: error.message,
-    customerId,
-    chargedChars,
-    time: new Date().toISOString(),
-  });
-
-  const { data: customer, error: loadError } = await supabase
-    .from("customers")
-    .select("used_chars, quota_chars, extra_used_chars, extra_quota_chars, billing_period, billing_cycle_day")
-    .eq("id", customerId)
-    .single();
-
-  if (loadError || !customer) {
-    console.error("Load customer for fallback charge failed:", loadError?.message);
-    return false;
-  }
-
-  const currentPeriod = getCurrentBillingPeriod(customer.billing_cycle_day);
-  const monthlyUsed = customer.billing_period === currentPeriod ? Number(customer.used_chars || 0) : 0;
-  const monthlyRemaining = Math.max(0, Number(customer.quota_chars || 0) - monthlyUsed);
-  const extraUsed = Number(customer.extra_used_chars || 0);
-  const extraRemaining = Math.max(0, Number(customer.extra_quota_chars || 0) - extraUsed);
-  if (monthlyRemaining + extraRemaining < chargedChars) return false;
-
-  const monthlyCharge = Math.min(monthlyRemaining, chargedChars);
-  const extraCharge = chargedChars - monthlyCharge;
-
-  const { error: updateError } = await supabase
-    .from("customers")
-    .update({
-      used_chars: monthlyUsed + monthlyCharge,
-      extra_used_chars: extraUsed + extraCharge,
-      billing_period: currentPeriod,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", customerId);
-
-  if (updateError) {
-    console.error("Fallback charge failed:", updateError.message);
-    return false;
-  }
-
-  return true;
 }
 
 const app = express();
@@ -1312,7 +882,7 @@ const app = express();
 app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
-    service: "line-translate-bot-commercial",
+    service: "line-translate-bot-userid",
     cacheSize: translationCache.size,
     database: "supabase",
   });
@@ -1424,31 +994,31 @@ app.get("/admin", requireAdmin, async (req, res) => {
   }
 });
 
-app.post("/admin/customers", requireAdmin, async (req, res) => {
+app.post("/admin/users", requireAdmin, async (req, res) => {
   const token = adminTokenFromRequest(req);
-  const input = normalizeCustomerInput(req.body);
-  const validationError = validateCustomerInput(input);
+  const input = normalizeUserInput(req.body);
+  const validationError = validateUserInput(input);
 
   if (validationError) {
     res.redirect(buildAdminRedirect(token, validationError));
     return;
   }
 
-  const { error } = await supabase.from("customers").insert(input);
+  const { error } = await supabase.from("users").insert(input);
 
   if (error) {
-    console.error("Create customer failed:", error);
+    console.error("Create user failed:", error);
     res.redirect(buildAdminRedirect(token, `创建失败：${error.message}`));
     return;
   }
 
-  res.redirect(buildAdminRedirect(token, "客户已创建。"));
+  res.redirect(buildAdminRedirect(token, "用户已创建。"));
 });
 
-app.post("/admin/customers/:id", requireAdmin, async (req, res) => {
+app.post("/admin/users/:id", requireAdmin, async (req, res) => {
   const token = adminTokenFromRequest(req);
-  const input = normalizeCustomerInput(req.body);
-  const validationError = validateCustomerInput(input);
+  const input = normalizeUserInput(req.body);
+  const validationError = validateUserInput(input);
 
   if (validationError) {
     res.redirect(buildAdminRedirect(token, validationError));
@@ -1456,7 +1026,7 @@ app.post("/admin/customers/:id", requireAdmin, async (req, res) => {
   }
 
   const { error } = await supabase
-    .from("customers")
+    .from("users")
     .update({
       ...input,
       updated_at: new Date().toISOString(),
@@ -1464,123 +1034,106 @@ app.post("/admin/customers/:id", requireAdmin, async (req, res) => {
     .eq("id", req.params.id);
 
   if (error) {
-    console.error("Update customer failed:", error);
+    console.error("Update user failed:", error);
     res.redirect(buildAdminRedirect(token, `保存失败：${error.message}`));
     return;
   }
 
-  res.redirect(buildAdminRedirect(token, "客户已保存。"));
+  res.redirect(buildAdminRedirect(token, "用户已保存。"));
 });
 
-app.post("/admin/customers/:id/topup", requireAdmin, async (req, res) => {
+app.post("/admin/renewals", requireAdmin, async (req, res) => {
   const token = adminTokenFromRequest(req);
-  const topupChars = parseNonNegativeInteger(req.body.topup_chars);
-  const topupNote = String(req.body.topup_note || "").trim();
+  const lineUserId = String(req.body.line_user_id || "").trim();
+  const renewalType = String(req.body.renewal_type || "monthly");
+  const chars = parseNonNegativeInteger(req.body.chars);
+  const months = Math.max(1, Number.parseInt(req.body.months || "1", 10) || 1);
+  const note = String(req.body.note || "").trim();
 
-  if (topupChars <= 0) {
-    res.redirect(buildAdminRedirect(token, "加购额度必须大于 0。"));
+  if (!lineUserId) {
+    res.redirect(buildAdminRedirect(token, "USERID 不能为空。"));
     return;
   }
 
-  const { data: customer, error: loadError } = await supabase
-    .from("customers")
-    .select("extra_quota_chars, notes")
-    .eq("id", req.params.id)
-    .single();
+  const { data: user, error: loadError } = await supabase
+    .from("users")
+    .select("*")
+    .eq("line_user_id", lineUserId)
+    .maybeSingle();
 
-  if (loadError || !customer) {
-    console.error("Load customer for topup failed:", loadError);
-    res.redirect(buildAdminRedirect(token, `加购失败：${loadError?.message || "客户不存在"}`));
+  if (loadError || !user) {
+    res.redirect(buildAdminRedirect(token, `续费失败：${loadError?.message || "找不到该 USERID"}`));
     return;
   }
 
-  const noteLine = `${new Date().toISOString()} 加购 ${topupChars} 字符${topupNote ? `：${topupNote}` : ""}`;
-  const nextNotes = [customer.notes, noteLine].filter(Boolean).join("\n");
-  const { error } = await supabase
-    .from("customers")
-    .update({
-      extra_quota_chars: Number(customer.extra_quota_chars || 0) + topupChars,
-      notes: nextNotes,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", req.params.id);
+  const patch = {
+    status: "active",
+    updated_at: new Date().toISOString(),
+  };
+  let renewalNote = note;
+  let charsDelta = 0;
+  let expiresAtAfter = user.expires_at;
 
-  if (error) {
-    console.error("Top up customer failed:", error);
-    res.redirect(buildAdminRedirect(token, `加购失败：${error.message}`));
+  if (renewalType === "monthly") {
+    if (chars <= 0) {
+      res.redirect(buildAdminRedirect(token, "月度续费字符数必须大于 0。"));
+      return;
+    }
+
+    const today = getBangkokDateString();
+    const currentExpiry = formatDateInput(user.expires_at);
+    const baseDate =
+      currentExpiry && new Date(`${currentExpiry}T23:59:59+07:00`).getTime() > Date.now()
+        ? currentExpiry
+        : today;
+    const nextExpiryDate = addMonthsToDateString(baseDate, months);
+
+    patch.monthly_quota_chars = chars;
+    patch.expires_at = normalizeExpiryDate(nextExpiryDate);
+    patch.billing_period = getCurrentBillingPeriod();
+    if (req.body.reset_monthly_used === "on") patch.monthly_used_chars = 0;
+    expiresAtAfter = patch.expires_at;
+    charsDelta = chars;
+    renewalNote = renewalNote || `月度续费 ${months} 个月，月度额度 ${chars} 字符`;
+  } else if (renewalType === "topup") {
+    if (chars <= 0) {
+      res.redirect(buildAdminRedirect(token, "加油包字符数必须大于 0。"));
+      return;
+    }
+
+    patch.extra_quota_chars = Number(user.extra_quota_chars || 0) + chars;
+    charsDelta = chars;
+    renewalNote = renewalNote || `加油包充值 ${chars} 字符`;
+  } else {
+    res.redirect(buildAdminRedirect(token, "续费类型不正确。"));
     return;
   }
 
-  res.redirect(buildAdminRedirect(token, `已增加加油包额度 ${formatNumber(topupChars)} 字符。`));
+  const { error: updateError } = await supabase.from("users").update(patch).eq("id", user.id);
+
+  if (updateError) {
+    console.error("Renew user failed:", updateError);
+    res.redirect(buildAdminRedirect(token, `续费失败：${updateError.message}`));
+    return;
+  }
+
+  const { error: renewalError } = await supabase.from("user_renewals").insert({
+    user_id: user.id,
+    type: renewalType,
+    chars_delta: charsDelta,
+    expires_at_before: user.expires_at,
+    expires_at_after: expiresAtAfter,
+    note: renewalNote,
+  });
+
+  if (renewalError) {
+    console.warn("Record renewal failed:", renewalError.message);
+  }
+
+  res.redirect(buildAdminRedirect(token, renewalType === "monthly" ? "月度续费已完成。" : "加油包充值已完成。"));
 });
 
-app.post("/admin/customers/:id/reset-monthly", requireAdmin, async (req, res) => {
-  const token = adminTokenFromRequest(req);
-  const { data: customer, error: loadError } = await supabase
-    .from("customers")
-    .select("billing_cycle_day")
-    .eq("id", req.params.id)
-    .single();
-
-  if (loadError || !customer) {
-    console.error("Load customer for monthly reset failed:", loadError);
-    res.redirect(buildAdminRedirect(token, `重置失败：${loadError?.message || "客户不存在"}`));
-    return;
-  }
-
-  const { error } = await supabase
-    .from("customers")
-    .update({
-      used_chars: 0,
-      billing_period: getCurrentBillingPeriod(customer.billing_cycle_day),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", req.params.id);
-
-  if (error) {
-    console.error("Reset monthly usage failed:", error);
-    res.redirect(buildAdminRedirect(token, `重置失败：${error.message}`));
-    return;
-  }
-
-  res.redirect(buildAdminRedirect(token, "本月已用额度已重置。"));
-});
-
-app.post("/admin/activations/:id/toggle", requireAdmin, async (req, res) => {
-  const token = adminTokenFromRequest(req);
-  const enabled = String(req.body.enabled || "") === "true";
-
-  const { error } = await supabase
-    .from("activations")
-    .update({
-      enabled,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", req.params.id);
-
-  if (error) {
-    console.error("Toggle activation failed:", error);
-    res.redirect(buildAdminRedirect(token, `绑定开关失败：${error.message}`));
-    return;
-  }
-
-  res.redirect(buildAdminRedirect(token, enabled ? "绑定已开启。" : "绑定已关闭。"));
-});
-
-app.post("/admin/activations/:id/delete", requireAdmin, async (req, res) => {
-  const token = adminTokenFromRequest(req);
-  const { error } = await supabase.from("activations").delete().eq("id", req.params.id);
-
-  if (error) {
-    console.error("Delete activation failed:", error);
-    res.redirect(buildAdminRedirect(token, `解绑失败：${error.message}`));
-    return;
-  }
-
-  res.redirect(buildAdminRedirect(token, "绑定记录已解绑。"));
-});
-
-app.post("/webhook", line.middleware(middlewareConfig), async (req, res) => {
+app.post("/webhook", line.middleware({ channelSecret: process.env.LINE_CHANNEL_SECRET }), async (req, res) => {
   try {
     const events = req.body.events || [];
 
@@ -1637,10 +1190,13 @@ async function handleEvent(event) {
   if (!["user", "group", "room"].includes(event.source?.type)) return null;
   if (event.deliveryContext?.isRedelivery) return null;
 
-  if (BOT_USER_ID && event.source.userId === BOT_USER_ID) {
+  const lineUserId = event.source?.userId || "";
+  if (!lineUserId) return null;
+
+  if (BOT_USER_ID && lineUserId === BOT_USER_ID) {
     console.log("Ignored bot self message:", {
       sourceType: event.source.type,
-      userId: event.source.userId,
+      userId: lineUserId,
       time: new Date().toISOString(),
     });
     return null;
@@ -1649,48 +1205,53 @@ async function handleEvent(event) {
   const text = event.message.text.trim();
   if (!text) return null;
 
-  const conversation = getConversation(event);
-  if (!conversation.id) return null;
-
   const lower = text.toLowerCase();
   const targetCommand = parseTargetLangCommand(text);
+  const user = await findUserByLineUserId(lineUserId);
 
-  if (isActivateCommand(text)) {
-    return handleActivateCommand(event, text, conversation);
+  if (isUserIdCommand(lower) || isUsageCommand(lower)) {
+    return reply(event, buildUserUsageText(lineUserId, user));
   }
 
-  const state = await getEffectiveActivationState(event, conversation);
-
-  if (isStatusCommand(lower)) {
-    return reply(event, buildStatusText(conversation, state));
-  }
-
-  if (isUsageCommand(lower)) {
-    if (!state) return reply(event, buildNeedActivationText(conversation));
-    return reply(event, buildUsageText(state.customer));
-  }
-
-  if (isSetCommand(lower)) {
-    if (!state) return reply(event, buildNeedActivationText(conversation));
-    return handleSetCommand(event, lower, conversation, state.activation);
-  }
-
-  if (!state) {
-    if (targetCommand) return reply(event, buildNeedActivationText(conversation));
+  if (!user) {
+    if (event.source?.type === "user") return reply(event, buildNeedPermissionText(lineUserId));
+    if (isStatusCommand(lower) || isSetCommand(lower) || targetCommand) {
+      return reply(event, buildNeedPermissionText(lineUserId));
+    }
     return null;
   }
 
-  const customerCheck = isCustomerUsable(state.customer);
-  if (!customerCheck.ok || !state.activation.enabled) return null;
+  if (isStatusCommand(lower)) {
+    return reply(event, buildStatusText(event, user));
+  }
+
+  if (isSetCommand(lower)) {
+    return handleSetCommand(event, lower, user);
+  }
+
+  const userCheck = isUserUsable(user);
+  if (!userCheck.ok) {
+    if (event.source?.type === "user" || targetCommand) {
+      return reply(event, buildUserRejectedText(lineUserId, userCheck.reason, user));
+    }
+    return null;
+  }
+
   if (text.startsWith("!") || text.startsWith("//")) return null;
 
-  if (targetCommand && !targetCommand.text) return reply(event, `请输入要翻译的内容，例如：/${targetCommand.targetLang.toUpperCase()} 你好`);
+  if (targetCommand && !targetCommand.text) {
+    return reply(event, `请输入要翻译的内容，例如：/${targetCommand.targetLang.toUpperCase()} 你好`);
+  }
 
   const textToTranslate = targetCommand?.text || text;
-  const chargeMultiplier = !targetCommand && state.activation.mode === "trilingual" ? 2 : 1;
+  const mode = user.mode || "bilingual";
+  const fromLang = user.from_lang || "zh";
+  const toLang = user.to_lang || "th";
+  const chargeMultiplier = !targetCommand && mode === "trilingual" ? 2 : 1;
   const chargedChars = countChargeableChars(textToTranslate) * chargeMultiplier;
-  if (getRemainingChars(state.customer) < chargedChars) {
-    return reply(event, buildQuotaExceededText(state.customer));
+
+  if (getRemainingChars(user) < chargedChars) {
+    return reply(event, buildQuotaExceededText(lineUserId, user));
   }
 
   const sourceLang = normalizeCode(await detectLang(textToTranslate));
@@ -1699,9 +1260,9 @@ async function handleEvent(event) {
   console.log("Translating:", {
     sourceLang,
     targetLang: targetCommand?.targetLang || "",
-    mode: state.activation.mode,
-    conversationId: conversation.id,
-    customerId: state.customer.id,
+    mode,
+    sourceType: event.source?.type,
+    lineUserId,
     textLength: textToTranslate.length,
     chargedChars,
     time: new Date().toISOString(),
@@ -1710,133 +1271,170 @@ async function handleEvent(event) {
   const messages =
     targetCommand
       ? await buildDirectedMessages(textToTranslate, sourceLang, targetCommand.targetLang)
-      : state.activation.mode === "trilingual"
+      : mode === "trilingual"
         ? await buildTrilingualMessages(textToTranslate, sourceLang)
-        : await buildBilingualMessages(textToTranslate, sourceLang, state.activation);
+        : await buildBilingualMessages(textToTranslate, sourceLang, { from_lang: fromLang, to_lang: toLang });
 
   if (messages.length === 0) return null;
 
-  const charged = await chargeCustomerUsage(state.customer.id, chargedChars);
+  const charged = await chargeUserUsage(user.id, chargedChars);
   if (!charged) {
-    return reply(event, buildQuotaExceededText(state.customer));
+    return reply(event, buildQuotaExceededText(lineUserId, user));
   }
 
-  await touchActivation(state.activation.id);
+  await touchUser(user.id);
   return replyMessages(event, addOriginalQuote(event, messages));
 }
 
-async function handleActivateCommand(event, text, conversation) {
-  if (conversation.sourceType !== "user") {
-    return reply(event, "为了保护激活码，请先私聊机器人输入：activate 激活码。私聊激活后，再把机器人拉入群即可使用。");
+function buildNeedPermissionText(lineUserId) {
+  return [`请联系管理员添加权限。`, `USERID：${lineUserId}`].join("\n");
+}
+
+function buildUserUsageText(lineUserId, user) {
+  if (!user) {
+    return [`当前账号尚未开通权限。`, `请联系管理员添加权限。`, `USERID：${lineUserId}`].join("\n");
   }
 
-  const activationCode = parseActivationCode(text);
+  const expired = isUserExpired(user);
+  const monthlyRemaining = expired ? 0 : getMonthlyRemainingChars(user);
+  const extraRemaining = expired ? 0 : getExtraRemainingChars(user);
 
-  if (!activationCode) {
-    return reply(event, "请输入激活码：activate 你的激活码");
+  return [
+    `USERID：${lineUserId}`,
+    `用户名：${user.name}`,
+    `状态：${expired ? "已过期" : user.status}`,
+    `有效期：${formatDate(user.expires_at)}`,
+    `月度剩余：${formatNumber(monthlyRemaining)} 字符`,
+    `加油包剩余：${formatNumber(extraRemaining)} 字符`,
+    `总剩余：${formatNumber(getRemainingChars(user))} 字符`,
+  ].join("\n");
+}
+
+function buildStatusText(event, user) {
+  const userCheck = isUserUsable(user);
+  const lines = ["当前翻译状态", ""];
+
+  lines.push(`来源：${getConversationLabel(event)}`);
+  lines.push(`USERID：${event.source?.userId || ""}`);
+  lines.push(`用户名：${user.name}`);
+  lines.push(`有效：${userCheck.ok ? "是" : "否"}`);
+  lines.push(`状态：${isUserExpired(user) ? "已过期" : user.status}`);
+  lines.push(`到期时间：${formatDate(user.expires_at)}`);
+  lines.push(`模式：${user.mode === "trilingual" ? "三语模式" : "双语模式"}`);
+  if (user.mode === "trilingual") {
+    lines.push("语言：中文 / ภาษาไทย / မြန်မာဘာသာ");
+  } else {
+    lines.push(`语言：${getLangName(user.from_lang)} ↔ ${getLangName(user.to_lang)}`);
   }
+  lines.push("");
+  lines.push("发送 /usage 查看额度。");
 
-  const { data: customer, error } = await supabase
-    .from("customers")
-    .select("*")
-    .eq("activation_code", activationCode)
-    .maybeSingle();
+  return lines.join("\n");
+}
 
-  if (error) {
-    console.error("Find customer by activation code failed:", {
-      error: error.message,
-      conversationId: conversation.id,
-      time: new Date().toISOString(),
-    });
-    return reply(event, "系统暂时无法激活，请稍后再试或联系管理员。");
+function buildUserRejectedText(lineUserId, reason, user) {
+  if (reason === "status") {
+    return [`账号已暂停，请联系管理员。`, `USERID：${lineUserId}`].join("\n");
   }
-
-  if (!customer) {
-    return reply(event, "激活码不存在，请检查后重新输入。");
+  if (reason === "expired") {
+    return [`账号已过期，请联系管理员续费。`, `USERID：${lineUserId}`, `到期日期：${formatDate(user?.expires_at)}`].join("\n");
   }
-
-  const customerCheck = isCustomerUsable(customer);
-  if (!customerCheck.ok) {
-    return reply(event, buildActivationRejectedText(customerCheck.reason, customer));
+  if (reason === "quota") {
+    return buildQuotaExceededText(lineUserId, user);
   }
+  return buildNeedPermissionText(lineUserId);
+}
 
-  const ownerUserId = event.source?.userId || getOwnerUserIdFromConversation(conversation);
-  let customerPrivateActivation = null;
+function buildQuotaExceededText(lineUserId, user) {
+  return [
+    "当前字符额度不足，请联系管理员续费或购买加油包。",
+    `USERID：${lineUserId}`,
+    `月度剩余：${formatNumber(isUserExpired(user) ? 0 : getMonthlyRemainingChars(user))} 字符`,
+    `加油包剩余：${formatNumber(isUserExpired(user) ? 0 : getExtraRemainingChars(user))} 字符`,
+    `总剩余：${formatNumber(getRemainingChars(user))} 字符`,
+  ].join("\n");
+}
 
-  try {
-    customerPrivateActivation = await getPrivateActivationForCustomer(customer.id);
-  } catch (activationError) {
-    console.error("Check customer private activation failed:", {
-      error: activationError.message,
-      conversationId: conversation.id,
-      customerId: customer.id,
-      time: new Date().toISOString(),
-    });
-    return reply(event, "系统暂时无法激活，请稍后再试或联系管理员。");
-  }
+async function handleSetCommand(event, lower, user) {
+  const parts = lower.trim().split(/\s+/);
+  const sub = parts[1];
 
-  if (
-    customerPrivateActivation &&
-    customerPrivateActivation.conversation_id !== conversation.id
-  ) {
-    return reply(event, "该激活码已绑定其他用户，请联系管理员处理。");
-  }
+  if (sub === "3lang") {
+    const { error } = await supabase
+      .from("users")
+      .update({
+        mode: "trilingual",
+        from_lang: "zh",
+        to_lang: "th",
+        updated_at: new Date().toISOString(),
+        last_active_at: new Date().toISOString(),
+      })
+      .eq("id", user.id);
 
-  const existing = await getActivationState(conversation.id);
-  if (existing?.activation?.customer_id === customer.id) {
-    return reply(event, "当前聊天环境已经激活，无需重复激活。");
-  }
-
-  if (existing?.activation?.customer_id && existing.activation.customer_id !== customer.id) {
-    try {
-      await switchPrivateActivationCustomer(existing.activation, customer.id, ownerUserId);
-    } catch (switchError) {
-      console.error("Switch private activation failed:", {
-        error: switchError.message,
-        conversationId: conversation.id,
-        oldCustomerId: existing.activation.customer_id,
-        newCustomerId: customer.id,
-        time: new Date().toISOString(),
-      });
-      return reply(event, "切换激活码失败，请稍后再试或联系管理员。");
+    if (error) {
+      console.error("Update user language mode failed:", error);
+      return reply(event, "切换三语模式失败，请稍后再试。");
     }
 
     return reply(
       event,
       [
-        "激活码已切换，翻译继续开启。",
-        "你通过私聊带入的群聊或多人聊天室会继续使用新的激活码。",
-        `范围：${conversation.label}`,
-        `模式：${getLangName("zh")} ↔ ${getLangName("th")}`,
-        `剩余额度：${formatNumber(getRemainingChars(customer))} 字符`,
-        `到期时间：${formatDate(customer.expires_at)}`,
+        "三语模式已开启。",
+        "中文 / ภาษาไทย / မြန်မာဘာသာ 三语互译。",
+        "每条消息按 输入字符数 x 2 扣额度。",
+        "",
+        "切回双语：set zh th",
       ].join("\n")
     );
   }
 
-  try {
-    await createActivationState(conversation, customer.id, { owner_user_id: ownerUserId });
-  } catch (insertError) {
-    console.error("Create activation failed:", {
-      error: insertError.message,
-      conversationId: conversation.id,
-      customerId: customer.id,
-      time: new Date().toISOString(),
-    });
-    return reply(event, "激活失败，请稍后再试或联系管理员。");
+  if (parts.length === 3) {
+    const a = normalizeCode(parts[1]);
+    const b = normalizeCode(parts[2]);
+    const pairKey = [a, b].sort().join("|");
+
+    if (!VALID_LANG_PAIRS.has(pairKey)) {
+      return reply(event, buildSetHelpText("不支持该语言对，可用命令："));
+    }
+
+    const { error } = await supabase
+      .from("users")
+      .update({
+        mode: "bilingual",
+        from_lang: a,
+        to_lang: b,
+        updated_at: new Date().toISOString(),
+        last_active_at: new Date().toISOString(),
+      })
+      .eq("id", user.id);
+
+    if (error) {
+      console.error("Update user language pair failed:", error);
+      return reply(event, "切换语言失败，请稍后再试。");
+    }
+
+    return reply(event, `已切换：${getLangName(a)} ↔ ${getLangName(b)}\n\n发送 set 3lang 可切换到三语模式。`);
   }
 
-  return reply(
-    event,
-    [
-      "激活成功，翻译已开启。",
-      "现在可以把机器人拉入群聊或多人聊天室，无需在群里输入激活码。",
-      `范围：${conversation.label}`,
-      `模式：${getLangName("zh")} ↔ ${getLangName("th")}`,
-      `剩余额度：${formatNumber(getRemainingChars(customer))} 字符`,
-      `到期时间：${formatDate(customer.expires_at)}`,
-    ].join("\n")
-  );
+  await touchUser(user.id);
+  return reply(event, buildSetHelpText("set 命令用法："));
+}
+
+function buildSetHelpText(title) {
+  return [
+    title,
+    "",
+    "/TH 内容    指定翻译成泰文",
+    "/MM 内容    指定翻译成缅文",
+    "/ZH 内容    指定翻译成中文",
+    "/EN 内容    指定翻译成英文",
+    "/JP 内容    指定翻译成日文",
+    "/DE /FR /ES  指定翻译成德/法/西",
+    "",
+    "/status      查看当前状态",
+    "/usage       查看额度",
+    "userid       查看 USERID 和用量",
+  ].join("\n");
 }
 
 async function buildBilingualMessages(text, sourceLang, activation) {
@@ -1911,173 +1509,6 @@ function buildTranslationLine(targetLang, translated, maxLength = MAX_LINE_TEXT_
   const availableLength = maxLength - prefix.length;
   if (availableLength <= 0) return "";
   return `${prefix}${translated.slice(0, availableLength)}`;
-}
-
-async function handleSetCommand(event, lower, conversation, activation) {
-  const parts = lower.trim().split(/\s+/);
-  const sub = parts[1];
-
-  if (sub === "on") {
-    await updateActivation(activation.id, { enabled: true });
-    return reply(event, "翻译已开启。");
-  }
-
-  if (sub === "off") {
-    await updateActivation(activation.id, { enabled: false });
-    return reply(event, "翻译已关闭。");
-  }
-
-  if (sub === "3lang") {
-    await updateActivation(activation.id, {
-      enabled: true,
-      mode: "trilingual",
-      from_lang: "zh",
-      to_lang: "th",
-    });
-
-    return reply(
-      event,
-      [
-        "三语模式已开启。",
-        "中文 / ภาษาไทย / မြန်မာဘာသာ 三语互译。",
-        "每条消息按 输入字符数 x 2 扣额度。",
-        "",
-        "切回双语：set zh th",
-      ].join("\n")
-    );
-  }
-
-  if (parts.length === 3) {
-    const a = normalizeCode(parts[1]);
-    const b = normalizeCode(parts[2]);
-    const pairKey = [a, b].sort().join("|");
-
-    if (!VALID_LANG_PAIRS.has(pairKey)) {
-      return reply(event, buildSetHelpText("不支持该语言对，可用命令："));
-    }
-
-    await updateActivation(activation.id, {
-      enabled: true,
-      mode: "bilingual",
-      from_lang: a,
-      to_lang: b,
-    });
-
-    return reply(
-      event,
-      `已切换：${getLangName(a)} ↔ ${getLangName(b)}\n范围：${conversation.label}\n\n发送 set 3lang 可切换到三语模式。`
-    );
-  }
-
-  return reply(event, buildSetHelpText("set 命令用法："));
-}
-
-function buildSetHelpText(title) {
-  return [
-    title,
-    "",
-    "set zh th    中文 ↔ 泰文（默认）",
-    "set zh my    中文 ↔ 缅甸文",
-    "set zh en    中文 ↔ 英文",
-    "set th my    泰文 ↔ 缅甸文",
-    "set on       开启翻译",
-    "set off      关闭翻译",
-    "set 3lang    三语模式（中/泰/缅）",
-    "",
-    "/TH 内容    指定翻译成泰文",
-    "/MM 内容    指定翻译成缅文",
-    "/ZH 内容    指定翻译成中文",
-    "/EN 内容    指定翻译成英文",
-    "/JP 内容    指定翻译成日文",
-    "/DE /FR /ES  指定翻译成德/法/西",
-    "",
-    "/status      查看当前设置",
-    "/usage       查看额度用量",
-  ].join("\n");
-}
-
-function buildStatusText(conversation, state) {
-  const lines = ["当前翻译状态", ""];
-
-  lines.push(`来源：${conversation.label}`);
-
-  if (!state) {
-    lines.push("激活：未激活");
-    lines.push("");
-    lines.push(buildNeedActivationText(conversation));
-    return lines.join("\n");
-  }
-
-  const { activation, customer } = state;
-  const customerCheck = isCustomerUsable(customer);
-
-  lines.push("激活：已激活");
-  lines.push(`客户状态：${customer?.status || "unknown"}`);
-  lines.push(`有效：${customerCheck.ok ? "是" : "否"}`);
-  lines.push(`到期时间：${formatDate(customer?.expires_at)}`);
-  lines.push(`开关：${activation.enabled ? "开启" : "关闭"}`);
-
-  if (activation.mode === "trilingual") {
-    lines.push("模式：三语模式");
-    lines.push("语言：中文 / ภาษาไทย / မြန်မာဘာသာ");
-  } else {
-    lines.push("模式：双语模式");
-    lines.push(`语言：${getLangName(activation.from_lang)} ↔ ${getLangName(activation.to_lang)}`);
-  }
-
-  lines.push("");
-  lines.push("发送 set 查看命令列表。");
-  lines.push("发送 /usage 查看额度。");
-
-  return lines.join("\n");
-}
-
-function buildUsageText(customer) {
-  if (!customer) return buildNeedActivationText();
-  const monthlyUsed = getEffectiveMonthlyUsedChars(customer);
-  const monthlyRemaining = getMonthlyRemainingChars(customer);
-  const extraRemaining = getExtraRemainingChars(customer);
-
-  return [
-    "当前激活码用量",
-    "",
-    `月套餐：${formatNumber(customer.quota_chars)} 字符`,
-    `本月已用：${formatNumber(monthlyUsed)} 字符`,
-    `本月剩余：${formatNumber(monthlyRemaining)} 字符`,
-    `加油包剩余：${formatNumber(extraRemaining)} 字符`,
-    `总剩余：${formatNumber(getRemainingChars(customer))} 字符`,
-    `到期时间：${formatDate(customer.expires_at)}`,
-  ].join("\n");
-}
-
-function buildNeedActivationText(conversation = null) {
-  if (conversation?.sourceType === "group" || conversation?.sourceType === "room") {
-    return [
-      "当前群聊尚未绑定激活码。",
-      "如果你已经私聊机器人激活，请用同一个 LINE 账号在这个群里发送 /status 或任意一句话，机器人会自动绑定本群。",
-      "不要在群里发送激活码。",
-    ].join("\n");
-  }
-
-  return "当前聊天环境尚未激活。为了保护激活码，请先私聊机器人输入：activate 激活码。";
-}
-
-function buildQuotaExceededText(customer) {
-  return [
-    "当前激活码字符额度不足，已停止翻译。",
-    `本月剩余：${formatNumber(getMonthlyRemainingChars(customer))} 字符`,
-    `加油包剩余：${formatNumber(getExtraRemainingChars(customer))} 字符`,
-    `总剩余：${formatNumber(getRemainingChars(customer))} 字符`,
-    "请联系管理员增加额度。",
-  ].join("\n");
-}
-
-function buildActivationRejectedText(reason, customer) {
-  if (reason === "code_disabled") return "该激活码已被停用，请联系管理员。";
-  if (reason === "status") return `该客户状态为 ${customer.status}，暂时不能激活。`;
-  if (reason === "expired") return `该激活码已到期，到期时间：${formatDate(customer.expires_at)}`;
-  if (reason === "quota") return "该激活码字符额度已用完，请联系管理员增加额度。";
-  return "该激活码暂时不能使用，请联系管理员。";
 }
 
 async function detectLang(text) {
