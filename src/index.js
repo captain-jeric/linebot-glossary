@@ -221,6 +221,8 @@ const ADMIN_LANGUAGE_OPTIONS = [
 ];
 
 const translationCache = new Map();
+const TRADITIONAL_CHINESE_HINT_RE =
+  /[個們這裡嗎麼為與對時會說國語學體後發現讓買賣開關東廣門問間電車書長萬無風來過還點應當產業務員實認識聽見網頁電腦機構幫寫讀頭貓鳥魚馬龍雲台灣臺]/;
 
 function normalizeCode(code) {
   if (!code) return "und";
@@ -798,7 +800,7 @@ function buildAdminRedirectWithRenewUser(token, message, lineUserId) {
   if (message) params.set("message", message);
   if (lineUserId) params.set("renew_userid", lineUserId);
   const query = params.toString();
-  return query ? `/admin?${query}` : "/admin";
+  return `${query ? `/admin?${query}` : "/admin"}#recharge`;
 }
 
 function parseAdminListLimit(value) {
@@ -990,9 +992,9 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }
       : renewUser.status
     : "";
 
-  return `<section class="panel">
+  return `<section id="recharge" class="panel recharge-panel">
       <h2>流量充值</h2>
-      <form method="get" action="/admin" class="lookup-form">
+      <form method="get" action="/admin#recharge" class="lookup-form">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <label>USERID<input name="renew_userid" value="${escapeHtml(renewUserId || "")}" placeholder="输入 USERID 后检索" required></label>
         <button type="submit">检索</button>
@@ -1074,6 +1076,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     form { margin: 0; }
     .panel, .user { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; margin-bottom: 10px; }
     .panel { padding: 16px; }
+    .recharge-panel { scroll-margin-top: 14px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 14px; align-items: start; }
     .create-grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px 14px; align-items: start; }
     .wide { grid-column: span 2; }
@@ -1856,6 +1859,7 @@ async function detectLang(text) {
   if (/[\u1000-\u109F]/.test(text)) return "my";
   if (/[\u0E00-\u0E7F]/.test(text)) return "th";
   if (/[\u3040-\u30FF]/.test(text)) return "ja";
+  if (TRADITIONAL_CHINESE_HINT_RE.test(text)) return "zh-TW";
   if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
 
   try {
