@@ -481,17 +481,15 @@ async function bindConversationToUser(bindingKey, userId) {
 
   const { error } = await supabase
     .from("conversation_users")
-    .upsert(
-      {
-        source_type: bindingKey.sourceType,
-        conversation_id: bindingKey.conversationId,
-        user_id: userId,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "source_type,conversation_id" }
-    );
+    .insert({
+      source_type: bindingKey.sourceType,
+      conversation_id: bindingKey.conversationId,
+      user_id: userId,
+    });
 
   if (error) {
+    if (error.code === "23505") return;
+
     console.warn("Bind conversation user failed:", {
       error: error.message,
       sourceType: bindingKey.sourceType,
