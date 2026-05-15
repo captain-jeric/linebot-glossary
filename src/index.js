@@ -939,7 +939,10 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .panel, .user { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; margin-bottom: 10px; }
     .panel { padding: 16px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 14px; align-items: start; }
+    .create-grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px 14px; align-items: start; }
     .wide { grid-column: span 2; }
+    .full { grid-column: 1 / -1; }
+    .inline-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
     label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; color: #4b5870; }
     input, select { box-sizing: border-box; width: 100%; height: 38px; padding: 8px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; line-height: 20px; background: #fff; }
     input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 auto; }
@@ -981,7 +984,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .message { background: #ecfdf3; border: 1px solid #abefc6; color: #067647; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
     .message.error { background: #fff1f0; border-color: #ffccc7; color: #a8071a; margin-top: 14px; }
     @media (max-width: 860px) {
-      .grid, .quota-strip, .renew-grid, .renew-grid.compact, .field-row, .lookup-form, .metric-grid, .renew-actions { grid-template-columns: 1fr; }
+      .grid, .create-grid, .quota-strip, .renew-grid, .renew-grid.compact, .field-row, .lookup-form, .metric-grid, .renew-actions, .inline-row { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
       .list-toolbar { align-items: stretch; flex-direction: column; }
       .limit-form { align-items: stretch; }
@@ -1001,9 +1004,10 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
       <h2>新增用户</h2>
       <form method="post" action="/admin/users">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
-        <div class="grid">
+        <div class="create-grid">
           <label>USERID<input name="line_user_id" placeholder="Uxxxxxxxxxxxxxxxx" required></label>
           <label>用户名<input name="name" placeholder="后台自定义名称" required></label>
+          <label>月度额度<select name="monthly_quota_chars">${renderQuotaOptions(100000)}</select></label>
           <label>状态
             <select name="status">
               <option value="active">active</option>
@@ -1025,13 +1029,14 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
               <input id="new-expires-at" name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}">
             </span>
           </label>
-          <label>月度额度<select name="monthly_quota_chars">${renderQuotaOptions(100000)}</select></label>
           <input type="hidden" name="monthly_used_chars" value="0">
           <input type="hidden" name="extra_quota_chars" value="0">
           <input type="hidden" name="extra_used_chars" value="0">
-          <label class="wide">备注<input name="notes" placeholder="收款/套餐/客户备注"></label>
+          <div class="full inline-row">
+            <label>备注<input name="notes" placeholder="收款/套餐/客户备注"></label>
+            <button type="submit">创建用户</button>
+          </div>
         </div>
-        <p><button type="submit">创建用户</button></p>
       </form>
     </section>
 
