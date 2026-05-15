@@ -105,6 +105,13 @@ const LANG_NAME = {
   de: "Deutsch",
   fr: "Français",
   es: "Español",
+  ru: "Русский",
+  ms: "Bahasa Melayu",
+  ko: "한국어",
+  id: "Bahasa Indonesia",
+  vi: "Tiếng Việt",
+  hi: "हिन्दी",
+  ar: "العربية",
 };
 
 const LANG_FLAG = {
@@ -116,6 +123,13 @@ const LANG_FLAG = {
   de: "🇩🇪",
   fr: "🇫🇷",
   es: "🇪🇸",
+  ru: "🇷🇺",
+  ms: "🇲🇾",
+  ko: "🇰🇷",
+  id: "🇮🇩",
+  vi: "🇻🇳",
+  hi: "🇮🇳",
+  ar: "🇸🇦",
 };
 
 const LANG_SHORT_LABEL = {
@@ -127,6 +141,13 @@ const LANG_SHORT_LABEL = {
   de: "德/Deutsch",
   fr: "法/Français",
   es: "西/Español",
+  ru: "俄/RU",
+  ms: "马/MS",
+  ko: "韩/KO",
+  id: "印尼/ID",
+  vi: "越/VI",
+  hi: "印地/HI",
+  ar: "阿/AR",
 };
 
 const TARGET_LANG_COMMANDS = {
@@ -141,6 +162,16 @@ const TARGET_LANG_COMMANDS = {
   de: "de",
   fr: "fr",
   es: "es",
+  ru: "ru",
+  ms: "ms",
+  ko: "ko",
+  kr: "ko",
+  id: "id",
+  in: "id",
+  vi: "vi",
+  vn: "vi",
+  hi: "hi",
+  ar: "ar",
 };
 
 const translationCache = new Map();
@@ -1430,6 +1461,13 @@ function buildSetHelpText(title) {
     "/EN 内容    指定翻译成英文",
     "/JP 内容    指定翻译成日文",
     "/DE /FR /ES  指定翻译成德/法/西",
+    "/RU 内容    指定翻译成俄文",
+    "/MS 内容    指定翻译成马来文",
+    "/KO 内容    指定翻译成韩文",
+    "/ID 内容    指定翻译成印尼文",
+    "/VI 内容    指定翻译成越南文",
+    "/HI 内容    指定翻译成印地文",
+    "/AR 内容    指定翻译成阿拉伯文",
     "",
     "/status      查看当前状态",
     "/usage       查看额度",
