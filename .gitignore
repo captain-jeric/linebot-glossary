@@ -2,7 +2,7 @@
 .env.*
 !.env.example
 
-PROJECT_DOCUMENTATION.md
+OPERATION_MANUAL.md
 
 secrets/
 node_modules/

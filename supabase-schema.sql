@@ -1,13 +1,7 @@
 create extension if not exists pgcrypto;
 
-drop function if exists public.increment_customer_usage(uuid, bigint);
 drop function if exists public.increment_user_usage(uuid, bigint);
 drop function if exists public.recharge_user_flow(uuid, bigint, timestamptz);
-drop table if exists public.activations;
-drop table if exists public.conversation_users;
-drop table if exists public.customers;
-drop table if exists public.user_renewals;
-drop table if exists public.users;
 
 create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
@@ -53,6 +47,9 @@ create table if not exists public.conversation_users (
   conversation_id text not null,
   user_id uuid not null references public.users(id) on delete cascade,
   translation_enabled boolean not null default true,
+  mode text check (mode is null or mode in ('bilingual', 'trilingual')),
+  from_lang text,
+  to_lang text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (source_type, conversation_id)

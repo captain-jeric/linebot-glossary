@@ -10,7 +10,17 @@ create table if not exists public.conversation_users (
 );
 
 alter table public.conversation_users
-  add column if not exists translation_enabled boolean not null default true;
+  add column if not exists translation_enabled boolean not null default true,
+  add column if not exists mode text,
+  add column if not exists from_lang text,
+  add column if not exists to_lang text;
+
+alter table public.conversation_users
+  drop constraint if exists conversation_users_mode_check;
+
+alter table public.conversation_users
+  add constraint conversation_users_mode_check
+  check (mode is null or mode in ('bilingual', 'trilingual'));
 
 create index if not exists conversation_users_user_id_idx
   on public.conversation_users (user_id);

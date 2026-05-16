@@ -27,6 +27,9 @@ const LOG_FULL_WEBHOOK_BODY = process.env.LOG_FULL_WEBHOOK_BODY === "true";
 const MAX_LINE_TEXT_LENGTH = 4900;
 const CACHE_MAX_SIZE = 200;
 const BILLING_TIME_ZONE = "Asia/Bangkok";
+const SYSTEM_DEFAULT_MODE = "bilingual";
+const SYSTEM_DEFAULT_FROM_LANG = "zh";
+const SYSTEM_DEFAULT_TO_LANG = "th";
 const ADMIN_SESSION_COOKIE = "linebot_admin_session";
 const ADMIN_OAUTH_STATE_COOKIE = "linebot_admin_oauth_state";
 const ADMIN_SESSION_MAX_AGE_SECONDS = 60 * 60 * 12;
@@ -87,34 +90,11 @@ const translateClient = new Translate(buildTranslateClientOptions());
 
 const THREE_LANGS = ["zh", "th", "my"];
 
-const VALID_LANG_PAIRS = new Set([
-  "ja|zh",
-  "ko|zh",
-  "my|zh",
-  "ru|zh",
-  "th|zh",
-  "en|zh",
-  "th|zh-TW",
-  "zh|zh-TW",
-  "my|th",
-  "ru|th",
-  "en|th",
-  "en|my",
-]);
-
 const DEFAULT_TRANSLATION_PAIR_HELP_LINES = [
-  "set zh th    设置中文 ↔ 泰文",
-  "set zh my    设置中文 ↔ 缅文",
-  "set zh en    设置中文 ↔ 英文",
-  "set zh ja    设置中文 ↔ 日文",
-  "set zh ko    设置中文 ↔ 韩文",
-  "set zh ru    设置中文 ↔ 俄文",
-  "set zh tw    设置简体中文 ↔ 繁体中文",
-  "set tw th    设置繁体中文 ↔ 泰文",
-  "set th my    设置泰文 ↔ 缅文",
-  "set th en    设置泰文 ↔ 英文",
-  "set th ru    设置泰文 ↔ 俄文",
-  "set my en    设置缅文 ↔ 英文",
+  "支持任意两种语言组合，例如：",
+  "set zh th    默认中文 ↔ 泰文",
+  "set zh ja    默认中文 ↔ 日文",
+  "set th ja    默认泰文 ↔ 日文",
 ];
 
 const LANG_NAME = {
@@ -259,6 +239,10 @@ function getLangShortLabel(code) {
   return LANG_SHORT_LABEL[normalized] || getLangName(normalized);
 }
 
+function isSupportedDefaultLang(code) {
+  return ADMIN_LANGUAGE_OPTIONS.includes(normalizeCode(code));
+}
+
 function getConversationLabel(event) {
   if (event.source?.type === "group") return "群聊";
   if (event.source?.type === "room") return "多人聊天室";
@@ -352,6 +336,11 @@ function parseNonNegativeInteger(value) {
   return Math.max(0, Number.parseInt(value || "0", 10) || 0);
 }
 
+function parsePositiveInteger(value, fallback = 1) {
+  const parsed = Number.parseInt(value || String(fallback), 10);
+  return parsed > 0 ? parsed : fallback;
+}
+
 function formatNumber(value) {
   return Number(value || 0).toLocaleString("en-US");
 }
@@ -397,6 +386,57 @@ function isUserUsable(user) {
   if (isUserExpired(user)) return { ok: false, reason: "expired" };
   if (getRemainingChars(user) <= 0) return { ok: false, reason: "quota" };
   return { ok: true, reason: "" };
+}
+
+function isChineseCode(code) {
+  const normalized = normalizeCode(code);
+  return normalized === "zh" || normalized === "zh-TW";
+}
+
+function isExplicitChinesePair(a, b) {
+  const normalizedA = normalizeCode(a);
+  const normalizedB = normalizeCode(b);
+  return isChineseCode(normalizedA) && isChineseCode(normalizedB) && normalizedA !== normalizedB;
+}
+
+function matchesConfiguredLang(sourceLang, configuredLang, pairedLang) {
+  const source = normalizeCode(sourceLang);
+  const configured = normalizeCode(configuredLang);
+  if (source === configured) return true;
+  if (isChineseCode(source) && isChineseCode(configured) && !isExplicitChinesePair(configured, pairedLang)) {
+    return true;
+  }
+  return false;
+}
+
+function getBilingualTargetLang(sourceLang, activation) {
+  const source = normalizeCode(sourceLang);
+  const langFrom = normalizeCode(activation.from_lang || SYSTEM_DEFAULT_FROM_LANG);
+  const langTo = normalizeCode(activation.to_lang || SYSTEM_DEFAULT_TO_LANG);
+
+  if (matchesConfiguredLang(source, langFrom, langTo)) return langTo;
+  if (matchesConfiguredLang(source, langTo, langFrom)) return langFrom;
+  return langFrom;
+}
+
+function hasConversationTranslationConfig(conversationBinding) {
+  return Boolean(
+    conversationBinding?.mode ||
+      conversationBinding?.from_lang ||
+      conversationBinding?.to_lang
+  );
+}
+
+function getEffectiveTranslationConfig(user, conversationBinding) {
+  const hasConversationConfig = hasConversationTranslationConfig(conversationBinding);
+  const source = hasConversationConfig ? "conversation" : user ? "user" : "system";
+
+  return {
+    source,
+    mode: conversationBinding?.mode || user?.mode || SYSTEM_DEFAULT_MODE,
+    from_lang: normalizeCode(conversationBinding?.from_lang || user?.from_lang || SYSTEM_DEFAULT_FROM_LANG),
+    to_lang: normalizeCode(conversationBinding?.to_lang || user?.to_lang || SYSTEM_DEFAULT_TO_LANG),
+  };
 }
 
 function getCached(key) {
@@ -477,7 +517,7 @@ async function findConversationBinding(bindingKey) {
 
   const { data, error } = await supabase
     .from("conversation_users")
-    .select("user_id, translation_enabled")
+    .select("user_id, translation_enabled, mode, from_lang, to_lang")
     .eq("source_type", bindingKey.sourceType)
     .eq("conversation_id", bindingKey.conversationId)
     .maybeSingle();
@@ -506,6 +546,9 @@ async function findConversationBinding(bindingKey) {
 
   return {
     translationEnabled: data.translation_enabled !== false,
+    mode: data.mode || "",
+    from_lang: data.from_lang || "",
+    to_lang: data.to_lang || "",
     user,
   };
 }
@@ -560,6 +603,34 @@ async function setConversationTranslationEnabled(bindingKey, enabled) {
       sourceType: bindingKey.sourceType,
       conversationId: bindingKey.conversationId,
       enabled,
+      time: new Date().toISOString(),
+    });
+    return false;
+  }
+
+  return true;
+}
+
+async function setConversationLanguageConfig(bindingKey, config) {
+  if (!bindingKey?.conversationId) return false;
+
+  const { error } = await supabase
+    .from("conversation_users")
+    .update({
+      mode: config.mode,
+      from_lang: config.from_lang,
+      to_lang: config.to_lang,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("source_type", bindingKey.sourceType)
+    .eq("conversation_id", bindingKey.conversationId);
+
+  if (error) {
+    console.warn("Update conversation language config failed:", {
+      error: error.message,
+      sourceType: bindingKey.sourceType,
+      conversationId: bindingKey.conversationId,
+      config,
       time: new Date().toISOString(),
     });
     return false;
@@ -761,8 +832,24 @@ function normalizeUserInput(body, existing = {}) {
       body.used_chars === undefined
         ? parseNonNegativeInteger(existing.used_chars)
         : parseNonNegativeInteger(body.used_chars),
-    expires_at: normalizeExpiryDate(defaultExpiryDate()),
+    expires_at: normalizeExpiryDate(body.expires_at || formatDateInput(existing.expires_at) || defaultExpiryDate()),
     notes: String(body.notes || "").trim() || null,
+  };
+}
+
+function buildUserUpdatePayload(input) {
+  return {
+    line_user_id: input.line_user_id,
+    name: input.name,
+    status: input.status,
+    mode: input.mode,
+    from_lang: input.from_lang,
+    to_lang: input.to_lang,
+    quota_chars: input.quota_chars,
+    used_chars: input.used_chars,
+    expires_at: input.expires_at,
+    notes: input.notes,
+    updated_at: new Date().toISOString(),
   };
 }
 
@@ -776,7 +863,7 @@ function validateUserInput(input) {
   if (!validStatuses.has(input.status)) return "用户状态不正确。";
   if (!validModes.has(input.mode)) return "翻译模式不正确。";
   if (!validLangs.has(input.from_lang) || !validLangs.has(input.to_lang)) return "默认语言不正确。";
-  if (input.mode === "bilingual" && input.from_lang === input.to_lang) return "源语言和目标语言不能相同。";
+  if (input.mode === "bilingual" && input.from_lang === input.to_lang) return "默认语言和互译语言不能相同。";
   if (!input.expires_at || Number.isNaN(new Date(input.expires_at).getTime())) {
     return "有效期格式不正确，例如：2027-05-15";
   }
@@ -794,6 +881,18 @@ function buildAdminRedirect(token, message) {
   return query ? `/admin?${query}` : "/admin";
 }
 
+function buildAdminRedirectWithOptions(token, message, options = {}) {
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (message) params.set("message", message);
+  if (options.search) params.set("search", options.search);
+  if (options.limit) params.set("limit", options.limit);
+  if (options.renewUserId) params.set("renew_userid", options.renewUserId);
+  const query = params.toString();
+  const hash = options.hash ? `#${options.hash}` : "";
+  return `${query ? `/admin?${query}` : "/admin"}${hash}`;
+}
+
 function buildAdminRedirectWithRenewUser(token, message, lineUserId) {
   const params = new URLSearchParams();
   if (token) params.set("token", token);
@@ -808,11 +907,65 @@ function parseAdminListLimit(value) {
   return [20, 50, 100].includes(parsed) ? parsed : 20;
 }
 
-async function loadAdminData(renewUserId = "", listLimit = 20) {
+function sanitizeAdminSearchTerm(value) {
+  return String(value || "").trim().replace(/[,%]/g, " ").slice(0, 80);
+}
+
+function applyUserSearch(query, searchTerm) {
+  if (!searchTerm) return query;
+  const pattern = `*${searchTerm}*`;
+  return query.or(`line_user_id.ilike.${pattern},name.ilike.${pattern},notes.ilike.${pattern}`);
+}
+
+async function loadConversationBindings(limit = 50) {
+  const { data, error } = await supabase
+    .from("conversation_users")
+    .select("*")
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  const bindings = data || [];
+  const userIds = [...new Set(bindings.map((binding) => binding.user_id).filter(Boolean))];
+  let usersById = new Map();
+
+  if (userIds.length > 0) {
+    const { data: users, error: usersError } = await supabase
+      .from("users")
+      .select("id, line_user_id, name, status, expires_at")
+      .in("id", userIds);
+
+    if (usersError) throw usersError;
+    usersById = new Map((users || []).map((user) => [user.id, user]));
+  }
+
+  return bindings.map((binding) => ({
+    ...binding,
+    user: usersById.get(binding.user_id) || null,
+  }));
+}
+
+async function loadRenewalHistory(userId, limit = 10) {
+  if (!userId) return [];
+
+  const { data, error } = await supabase
+    .from("user_renewals")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function loadAdminData(renewUserId = "", listLimit = 20, search = "") {
   const now = new Date().toISOString();
   const trimmedRenewUserId = String(renewUserId || "").trim();
   const safeLimit = parseAdminListLimit(listLimit);
-  const queries = [
+  const searchTerm = sanitizeAdminSearchTerm(search);
+  const activeQuery = applyUserSearch(
     supabase
       .from("users")
       .select("*")
@@ -820,12 +973,21 @@ async function loadAdminData(renewUserId = "", listLimit = 20) {
       .gte("expires_at", now)
       .order("expires_at", { ascending: true })
       .limit(safeLimit),
+    searchTerm
+  );
+  const inactiveQuery = applyUserSearch(
     supabase
       .from("users")
       .select("*")
       .or(`expires_at.lt.${now},status.eq.paused`)
       .order("expires_at", { ascending: false })
       .limit(safeLimit),
+    searchTerm
+  );
+  const queries = [
+    activeQuery,
+    inactiveQuery,
+    loadConversationBindings(),
   ];
 
   if (trimmedRenewUserId) {
@@ -839,21 +1001,28 @@ async function loadAdminData(renewUserId = "", listLimit = 20) {
   }
 
   const results = await Promise.all(queries);
-  const [{ data: activeUsers, error: activeError }, { data: expiredUsers, error: expiredError }] =
-    results;
-  const renewResult = results[2];
+  const [
+    { data: activeUsers, error: activeError },
+    { data: expiredUsers, error: expiredError },
+    conversationBindings,
+  ] = results;
+  const renewResult = results[3];
 
   if (activeError) throw activeError;
   if (expiredError) throw expiredError;
   if (renewResult?.error) throw renewResult.error;
+  const renewalHistory = await loadRenewalHistory(renewResult?.data?.id);
 
   return {
     activeUsers: activeUsers || [],
     expiredUsers: expiredUsers || [],
+    conversationBindings,
     renewUser: renewResult?.data || null,
+    renewalHistory,
     renewUserId: trimmedRenewUserId,
     renewUserNotFound: Boolean(trimmedRenewUserId && !renewResult?.data),
     listLimit: safeLimit,
+    searchTerm,
   };
 }
 
@@ -870,11 +1039,37 @@ function renderQuotaOptions(selectedValue = 100000) {
   return options.join("");
 }
 
+function renderMonthOptions(selectedValue = 12) {
+  const selected = parsePositiveInteger(selectedValue, 12);
+  return [1, 3, 6, 12]
+    .map((value) => `<option value="${value}" ${selected === value ? "selected" : ""}>${value} 个月</option>`)
+    .join("");
+}
+
 function renderLanguageOptions(selectedValue = "zh") {
   const selected = normalizeCode(selectedValue || "zh");
   return ADMIN_LANGUAGE_OPTIONS.map(
     (code) => `<option value="${code}" ${selected === code ? "selected" : ""}>${getLangShortLabel(code)}</option>`
   ).join("");
+}
+
+function renderOptionalLanguageOptions(selectedValue = "") {
+  const selected = selectedValue ? normalizeCode(selectedValue) : "";
+  return [
+    `<option value="" ${selected ? "" : "selected"}>使用用户默认</option>`,
+    ...ADMIN_LANGUAGE_OPTIONS.map(
+      (code) => `<option value="${code}" ${selected === code ? "selected" : ""}>${getLangShortLabel(code)}</option>`
+    ),
+  ].join("");
+}
+
+function renderOptionalModeOptions(selectedValue = "") {
+  const selected = String(selectedValue || "");
+  return [
+    `<option value="" ${selected ? "" : "selected"}>使用用户默认</option>`,
+    `<option value="bilingual" ${selected === "bilingual" ? "selected" : ""}>双语模式</option>`,
+    `<option value="trilingual" ${selected === "trilingual" ? "selected" : ""}>三语模式</option>`,
+  ].join("");
 }
 
 function renderListLimitOptions(selectedValue = 20) {
@@ -936,7 +1131,7 @@ function renderAdminLogin(errorMessage) {
 </html>`;
 }
 
-function renderUserRows(users) {
+function renderUserRows(users, token) {
   return (users || [])
     .map((user) => {
       const quotaChars = getQuotaChars(user);
@@ -975,13 +1170,59 @@ function renderUserRows(users) {
             ${renderReadonlyMetric("最近使用", formatDate(user.last_active_at))}
             ${renderReadonlyMetric("备注", user.notes || "-")}
           </div>
+          <form method="post" action="/admin/users/${escapeHtml(user.id)}" class="edit-form">
+            <input type="hidden" name="token" value="${escapeHtml(token)}">
+            <div class="edit-grid">
+              <label>USERID<input name="line_user_id" value="${escapeHtml(user.line_user_id)}" required></label>
+              <label>用户名<input name="name" value="${escapeHtml(user.name)}" required></label>
+              <label>状态
+                <select name="status">
+                  <option value="active" ${user.status === "active" ? "selected" : ""}>active</option>
+                  <option value="paused" ${user.status === "paused" ? "selected" : ""}>paused</option>
+                </select>
+              </label>
+              <label>模式
+                <select name="mode">
+                  <option value="bilingual" ${user.mode === "bilingual" ? "selected" : ""}>双语模式</option>
+                  <option value="trilingual" ${user.mode === "trilingual" ? "selected" : ""}>三语模式</option>
+                </select>
+              </label>
+              <label>默认语言<select name="from_lang">${renderLanguageOptions(user.from_lang)}</select></label>
+              <label>互译语言<select name="to_lang">${renderLanguageOptions(user.to_lang)}</select></label>
+              <label>总购买字符<input name="quota_chars" type="number" min="0" step="1" value="${quotaChars}" required></label>
+              <label>已用字符<input name="used_chars" type="number" min="0" step="1" value="${usedChars}" required></label>
+              <label>有效期至<input name="expires_at" type="date" value="${escapeHtml(formatDateInput(user.expires_at))}" required></label>
+              <label class="wide">备注<input name="notes" value="${escapeHtml(user.notes || "")}"></label>
+              <div class="form-actions edit-actions">
+                <button type="submit">保存用户</button>
+              </div>
+            </div>
+          </form>
         </div>
       </details>`;
     })
     .join("");
 }
 
-function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }) {
+function renderRenewalHistoryRows(renewalHistory) {
+  if (!renewalHistory || renewalHistory.length === 0) {
+    return '<p class="meta">暂无充值记录。</p>';
+  }
+
+  return `<div class="history-list">
+    ${renewalHistory
+      .map((item) => `<div class="history-row">
+        <span>${escapeHtml(formatDate(item.created_at))}</span>
+        <span>${escapeHtml(item.type)}</span>
+        <span>${formatNumber(item.chars_delta)} 字符</span>
+        <span>有效期：${escapeHtml(formatDate(item.expires_at_before))} → ${escapeHtml(formatDate(item.expires_at_after))}</span>
+        <span>${escapeHtml(item.note || "-")}</span>
+      </div>`)
+      .join("")}
+  </div>`;
+}
+
+function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, renewalHistory, token }) {
   const quotaChars = getQuotaChars(renewUser);
   const usedChars = getUsedChars(renewUser);
   const remainingChars = getStoredRemainingChars(renewUser);
@@ -1041,22 +1282,96 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token }
                       <label>增加流量
                         <select name="recharge_chars">${renderQuotaOptions(100000)}</select>
                       </label>
+                      <label>套餐时长
+                        <select name="recharge_months">${renderMonthOptions(12)}</select>
+                      </label>
+                      <label>充值后有效期
+                        <input name="expires_at" type="date">
+                      </label>
                       <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
                     </div>
-                    <p class="meta">每次充值都会把有效期重新计算为充值当天起 1 年。</p>
+                    <p class="meta">默认按套餐时长重新计算有效期；如填写了日期，则以填写日期为准。</p>
                     <div class="form-actions recharge-actions">
                       <button type="submit">提交充值</button>
                     </div>
                   </form>
                 </div>
               </div>
+              <h3>最近充值记录</h3>
+              ${renderRenewalHistoryRows(renewalHistory)}
             </div>`
           : `<p class="meta">输入 USERID 并点击检索后，可查看用户基本信息并充值流量。</p>`
       }
     </section>`;
 }
 
-function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, renewUserNotFound, listLimit, token, message, adminEmail }) {
+function renderConversationRows(conversationBindings, token) {
+  if (!conversationBindings || conversationBindings.length === 0) {
+    return '<p class="meta">暂无群聊或多人聊天室绑定。</p>';
+  }
+
+  return `<div class="conversation-list">
+    ${conversationBindings
+      .map((binding) => {
+        const user = binding.user;
+        const config = getEffectiveTranslationConfig(user, binding);
+        const configSource = hasConversationTranslationConfig(binding) ? "群聊设置" : "使用用户默认";
+        const languageSummary =
+          config.mode === "trilingual"
+            ? "中文 / ภาษาไทย / မြန်မာဘာသာ"
+            : `${getLangName(config.from_lang)} ↔ ${getLangName(config.to_lang)}`;
+        return `<details class="conversation-item">
+          <summary>
+            <span class="summary-main">
+              <strong>${binding.source_type === "group" ? "群聊" : "多人聊天室"}</strong>
+              <code>${escapeHtml(binding.conversation_id)}</code>
+              <span class="badge">${binding.translation_enabled === false ? "自动翻译关闭" : "自动翻译开启"}</span>
+            </span>
+            <span class="summary-stats">${escapeHtml(user ? `${user.name} / ${user.line_user_id}` : "未找到绑定用户")}</span>
+          </summary>
+          <div class="user-body">
+            <div class="metric-grid">
+              ${renderReadonlyMetric("绑定用户", user ? user.name : "-")}
+              ${renderReadonlyMetric("USERID", user ? user.line_user_id : "-")}
+              ${renderReadonlyMetric("绑定来源", binding.source_type)}
+              ${renderReadonlyMetric("语言配置", configSource)}
+              ${renderReadonlyMetric("模式", config.mode === "trilingual" ? "三语模式" : "双语模式")}
+              ${renderReadonlyMetric("语言", languageSummary)}
+              ${renderReadonlyMetric("更新时间", formatDate(binding.updated_at))}
+            </div>
+            <form method="post" action="/admin/conversations/${escapeHtml(binding.id)}" class="edit-form">
+              <input type="hidden" name="token" value="${escapeHtml(token)}">
+              <div class="edit-grid">
+                <label>改绑到 USERID<input name="line_user_id" placeholder="留空则只切换开关/解绑"></label>
+                <label>自动翻译
+                  <select name="translation_enabled">
+                    <option value="true" ${binding.translation_enabled !== false ? "selected" : ""}>开启</option>
+                    <option value="false" ${binding.translation_enabled === false ? "selected" : ""}>关闭</option>
+                  </select>
+                </label>
+                <label>群聊模式
+                  <select name="mode">${renderOptionalModeOptions(binding.mode)}</select>
+                </label>
+                <label>默认语言
+                  <select name="from_lang">${renderOptionalLanguageOptions(binding.from_lang)}</select>
+                </label>
+                <label>互译语言
+                  <select name="to_lang">${renderOptionalLanguageOptions(binding.to_lang)}</select>
+                </label>
+                <div class="form-actions edit-actions">
+                  <button type="submit" name="action" value="save">保存绑定</button>
+                  <button type="submit" name="action" value="unbind" class="secondary">解绑</button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </details>`;
+      })
+      .join("")}
+  </div>`;
+}
+
+function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, renewUser, renewUserId, renewUserNotFound, renewalHistory, listLimit, searchTerm, token, message, adminEmail }) {
   const defaultExpiry = defaultExpiryDate();
   const safeListLimit = parseAdminListLimit(listLimit);
 
@@ -1078,7 +1393,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .panel { padding: 16px; }
     .recharge-panel { scroll-margin-top: 14px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 14px; align-items: start; }
-    .create-grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px 14px; align-items: start; }
+    .create-grid, .edit-grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px 14px; align-items: start; }
     .wide { grid-column: span 2; }
     .full { grid-column: 1 / -1; }
     .inline-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
@@ -1096,6 +1411,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .badge { background: #e8f2ff; color: #175cd3; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
     .danger-badge { background: #fff1f0; color: #a8071a; }
     .user-body { border-top: 1px solid #e8edf3; padding: 14px; }
+    .edit-form { border-top: 1px solid #e8edf3; margin-top: 14px; padding-top: 14px; }
     .renew-grid { display: grid; grid-template-columns: minmax(240px, 1.4fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr); gap: 14px; align-items: start; }
     .renew-grid.compact { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
     .lookup-form { display: grid; grid-template-columns: minmax(260px, calc(50% - 6px)) auto; gap: 12px; align-items: end; justify-content: start; }
@@ -1118,7 +1434,7 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .renew-card h3 { margin: 0 0 12px; font-size: 16px; }
     .list-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 24px; flex-wrap: wrap; }
     .list-toolbar h2 { margin: 0; }
-    .limit-form { display: flex; align-items: end; gap: 10px; }
+    .limit-form, .search-form { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
     .limit-form label { width: 130px; }
     .form-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
     .recharge-actions { justify-content: flex-end; margin-top: 24px; }
@@ -1127,11 +1443,14 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
     .meta { color: #536078; font-size: 13px; margin: 10px 0 0; }
     .message { background: #ecfdf3; border: 1px solid #abefc6; color: #067647; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
     .message.error { background: #fff1f0; border-color: #ffccc7; color: #a8071a; margin-top: 14px; }
+    .history-list, .conversation-list { display: grid; gap: 8px; margin-top: 10px; }
+    .history-row { display: grid; grid-template-columns: 90px 90px 130px minmax(180px, 1fr) minmax(160px, 1fr); gap: 10px; padding: 9px 10px; background: #f8fafc; border: 1px solid #e8edf3; border-radius: 6px; font-size: 13px; }
+    .conversation-item { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; }
     @media (max-width: 860px) {
-      .grid, .create-grid, .renew-grid, .renew-grid.compact, .lookup-form, .metric-grid, .renew-metric-row, .renew-actions, .renew-split, .inline-row, .create-actions { grid-template-columns: 1fr; }
+      .grid, .create-grid, .edit-grid, .renew-grid, .renew-grid.compact, .lookup-form, .metric-grid, .renew-metric-row, .renew-actions, .renew-split, .inline-row, .create-actions, .history-row { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
       .list-toolbar { align-items: stretch; flex-direction: column; }
-      .limit-form { align-items: stretch; }
+      .limit-form, .search-form { align-items: stretch; }
       .limit-form label { width: 100%; }
       summary { align-items: flex-start; flex-direction: column; }
       .summary-stats { justify-content: flex-start; }
@@ -1159,8 +1478,8 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
             </select>
           </label>
           <input type="hidden" name="mode" value="bilingual">
-          <label>源语言<select name="from_lang">${renderLanguageOptions("zh")}</select></label>
-          <label>目标语言<select name="to_lang">${renderLanguageOptions("th")}</select></label>
+          <label>默认语言<select name="from_lang">${renderLanguageOptions("zh")}</select></label>
+          <label>互译语言<select name="to_lang">${renderLanguageOptions("th")}</select></label>
           <label>有效期至<input name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}" readonly></label>
           <input type="hidden" name="used_chars" value="0">
           <div class="full inline-row create-actions">
@@ -1171,21 +1490,27 @@ function renderAdminPage({ activeUsers, expiredUsers, renewUser, renewUserId, re
       </form>
     </section>
 
-    ${renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, token })}
+    ${renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, renewalHistory, token })}
 
     <div class="list-toolbar">
       <h2>有效用户（即将到期优先，前 ${safeListLimit} 条）</h2>
-      <form method="get" action="/admin" class="limit-form">
+      <form method="get" action="/admin" class="search-form">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         ${renewUserId ? `<input type="hidden" name="renew_userid" value="${escapeHtml(renewUserId)}">` : ""}
+        <label>搜索用户<input name="search" value="${escapeHtml(searchTerm || "")}" placeholder="USERID / 用户名 / 备注"></label>
         <label>显示数量<select name="limit">${renderListLimitOptions(safeListLimit)}</select></label>
         <button type="submit" class="secondary">应用</button>
       </form>
     </div>
-    ${renderUserRows(activeUsers) || '<section class="panel">暂无有效用户。</section>'}
+    ${renderUserRows(activeUsers, token) || '<section class="panel">暂无有效用户。</section>'}
 
     <h2>过期用户（刚刚过期优先，前 ${safeListLimit} 条）</h2>
-    ${renderUserRows(expiredUsers) || '<section class="panel">暂无过期用户。</section>'}
+    ${renderUserRows(expiredUsers, token) || '<section class="panel">暂无过期用户。</section>'}
+
+    <section id="conversations" class="panel">
+      <h2>群聊绑定管理</h2>
+      ${renderConversationRows(conversationBindings, token)}
+    </section>
   </main>
 </body>
 </html>`;
@@ -1303,7 +1628,7 @@ app.get("/admin/logout", (_req, res) => {
 
 app.get("/admin", requireAdmin, async (req, res) => {
   try {
-    const data = await loadAdminData(req.query.renew_userid || "", req.query.limit || "20");
+    const data = await loadAdminData(req.query.renew_userid || "", req.query.limit || "20", req.query.search || "");
     res.status(200).send(
       renderAdminPage({
         ...data,
@@ -1352,10 +1677,46 @@ app.post("/admin/users", requireAdmin, async (req, res) => {
   res.redirect(buildAdminRedirect(token, "用户已创建。"));
 });
 
+app.post("/admin/users/:id", requireAdmin, async (req, res) => {
+  const token = adminTokenFromRequest(req);
+  const { data: existing, error: loadError } = await supabase
+    .from("users")
+    .select("*")
+    .eq("id", req.params.id)
+    .single();
+
+  if (loadError || !existing) {
+    res.redirect(buildAdminRedirect(token, `保存失败：${loadError?.message || "找不到该用户"}`));
+    return;
+  }
+
+  const input = normalizeUserInput(req.body, existing);
+  const validationError = validateUserInput(input);
+
+  if (validationError) {
+    res.redirect(buildAdminRedirect(token, validationError));
+    return;
+  }
+
+  const { error } = await supabase
+    .from("users")
+    .update(buildUserUpdatePayload(input))
+    .eq("id", existing.id);
+
+  if (error) {
+    console.error("Update user failed:", error);
+    res.redirect(buildAdminRedirect(token, `保存失败：${error.message}`));
+    return;
+  }
+
+  res.redirect(buildAdminRedirectWithOptions(token, "用户信息已保存。", { renewUserId: input.line_user_id }));
+});
+
 app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
   const token = adminTokenFromRequest(req);
   const lineUserId = String(req.body.line_user_id || "").trim();
   const rechargeChars = parseNonNegativeInteger(req.body.recharge_chars);
+  const rechargeMonths = parsePositiveInteger(req.body.recharge_months, 12);
   const note = String(req.body.note || "").trim();
 
   if (rechargeChars <= 0) {
@@ -1374,7 +1735,13 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
     return;
   }
 
-  const nextExpiryDate = defaultExpiryDate();
+  const customExpiryDate = String(req.body.expires_at || "").trim();
+  const nextExpiryDate = customExpiryDate || addMonthsToDateString(getBangkokDateString(), rechargeMonths);
+  if (Number.isNaN(new Date(normalizeExpiryDate(nextExpiryDate)).getTime())) {
+    res.redirect(buildAdminRedirectWithRenewUser(token, "充值后有效期格式不正确。", lineUserId));
+    return;
+  }
+
   const { data: rechargeData, error: updateError } = await supabase.rpc("recharge_user_flow", {
     p_user_id: user.id,
     p_chars: rechargeChars,
@@ -1395,7 +1762,7 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
     chars_delta: rechargeChars,
     expires_at_before: rechargeResult.expires_at_before,
     expires_at_after: rechargeResult.expires_at,
-    note: note || `流量充值 ${rechargeChars} 字符，有效期重新计算 1 年`,
+    note: note || `流量充值 ${rechargeChars} 字符，有效期设置为 ${nextExpiryDate}`,
   });
 
   if (renewalError) {
@@ -1403,6 +1770,80 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
   }
 
   res.redirect(buildAdminRedirectWithRenewUser(token, "流量充值已完成。", user.line_user_id));
+});
+
+app.post("/admin/conversations/:id", requireAdmin, async (req, res) => {
+  const token = adminTokenFromRequest(req);
+  const action = String(req.body.action || "save");
+
+  if (action === "unbind") {
+    const { error } = await supabase
+      .from("conversation_users")
+      .delete()
+      .eq("id", req.params.id);
+
+    if (error) {
+      console.error("Unbind conversation failed:", error);
+      res.redirect(buildAdminRedirectWithOptions(token, `解绑失败：${error.message}`, { hash: "conversations" }));
+      return;
+    }
+
+    res.redirect(buildAdminRedirectWithOptions(token, "群聊绑定已解绑。", { hash: "conversations" }));
+    return;
+  }
+
+  const lineUserId = String(req.body.line_user_id || "").trim();
+  const translationEnabled = String(req.body.translation_enabled || "true") === "true";
+  const mode = String(req.body.mode || "").trim();
+  const fromLang = req.body.from_lang ? normalizeCode(req.body.from_lang) : "";
+  const toLang = req.body.to_lang ? normalizeCode(req.body.to_lang) : "";
+  const validModes = new Set(["", "bilingual", "trilingual"]);
+  const validLangs = new Set(["", ...ADMIN_LANGUAGE_OPTIONS]);
+
+  if (!validModes.has(mode)) {
+    res.redirect(buildAdminRedirectWithOptions(token, "保存失败：群聊模式不正确。", { hash: "conversations" }));
+    return;
+  }
+
+  if (!validLangs.has(fromLang) || !validLangs.has(toLang)) {
+    res.redirect(buildAdminRedirectWithOptions(token, "保存失败：群聊语言不正确。", { hash: "conversations" }));
+    return;
+  }
+
+  if (mode !== "trilingual" && fromLang && toLang && fromLang === toLang) {
+    res.redirect(buildAdminRedirectWithOptions(token, "保存失败：默认语言和互译语言不能相同。", { hash: "conversations" }));
+    return;
+  }
+
+  const updatePayload = {
+    translation_enabled: translationEnabled,
+    mode: mode || null,
+    from_lang: fromLang || null,
+    to_lang: toLang || null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (lineUserId) {
+    const user = await findUserByLineUserId(lineUserId);
+    if (!user) {
+      res.redirect(buildAdminRedirectWithOptions(token, `保存失败：找不到 USERID ${lineUserId}`, { hash: "conversations" }));
+      return;
+    }
+    updatePayload.user_id = user.id;
+  }
+
+  const { error } = await supabase
+    .from("conversation_users")
+    .update(updatePayload)
+    .eq("id", req.params.id);
+
+  if (error) {
+    console.error("Update conversation binding failed:", error);
+    res.redirect(buildAdminRedirectWithOptions(token, `保存失败：${error.message}`, { hash: "conversations" }));
+    return;
+  }
+
+  res.redirect(buildAdminRedirectWithOptions(token, "群聊绑定已保存。", { hash: "conversations" }));
 });
 
 app.post("/webhook", line.middleware({ channelSecret: process.env.LINE_CHANNEL_SECRET }), async (req, res) => {
@@ -1480,15 +1921,17 @@ async function handleEvent(event) {
   const lower = text.toLowerCase();
   const targetCommand = parseTargetLangCommand(text);
   const actorUser = await findUserByLineUserId(lineUserId);
+  const actorUserCheck = actorUser ? isUserUsable(actorUser) : { ok: false, reason: "not_found" };
   const bindingKey = getConversationBindingKey(event);
 
-  if (bindingKey && actorUser) {
+  if (bindingKey && actorUserCheck.ok) {
     await bindConversationToUser(bindingKey, actorUser.id);
   }
 
   const conversationBinding = bindingKey ? await findConversationBinding(bindingKey) : null;
   const conversationTranslationEnabled = conversationBinding?.translationEnabled !== false;
   const user = actorUser || conversationBinding?.user || null;
+  const translationConfig = getEffectiveTranslationConfig(user, conversationBinding);
 
   if (isHelpCommand(lower)) {
     return reply(event, buildPublicHelpText());
@@ -1519,11 +1962,14 @@ async function handleEvent(event) {
   }
 
   if (isStatusCommand(lower)) {
-    return reply(event, buildStatusText(event, user, { conversationTranslationEnabled }));
+    return reply(event, buildStatusText(event, user, { conversationTranslationEnabled, translationConfig }));
   }
 
   if (isSetCommand(lower)) {
     if (!actorUser) return reply(event, buildNeedPermissionText(lineUserId));
+    if (!actorUserCheck.ok) {
+      return reply(event, buildUserRejectedText(lineUserId, actorUserCheck.reason, actorUser));
+    }
     if (bindingKey && (lower === "set on" || lower === "set off")) {
       const enabled = lower === "set on";
       const updated = await setConversationTranslationEnabled(bindingKey, enabled);
@@ -1531,7 +1977,7 @@ async function handleEvent(event) {
       await touchUser(actorUser.id);
       return reply(event, enabled ? "群聊自动翻译已开启。" : "群聊自动翻译已关闭。\n之后只有 /TH、/ZH、/MM 等指定翻译命令会触发翻译。");
     }
-    return handleSetCommand(event, lower, user);
+    return handleSetCommand(event, lower, actorUser, { bindingKey });
   }
 
   const userCheck = isUserUsable(user);
@@ -1551,9 +1997,9 @@ async function handleEvent(event) {
   if (bindingKey && !conversationTranslationEnabled && !targetCommand) return null;
 
   const textToTranslate = targetCommand?.text || text;
-  const mode = user.mode || "bilingual";
-  const fromLang = user.from_lang || "zh";
-  const toLang = user.to_lang || "th";
+  const mode = translationConfig.mode;
+  const fromLang = translationConfig.from_lang;
+  const toLang = translationConfig.to_lang;
   const chargeMultiplier = !targetCommand && mode === "trilingual" ? 2 : 1;
   const chargedChars = countChargeableChars(textToTranslate) * chargeMultiplier;
 
@@ -1563,6 +2009,11 @@ async function handleEvent(event) {
 
   const sourceLang = normalizeCode(await detectLang(textToTranslate));
   if (sourceLang === "und") return null;
+
+  const bilingualTargetLang =
+    !targetCommand && mode === "bilingual"
+      ? getBilingualTargetLang(sourceLang, { from_lang: fromLang, to_lang: toLang })
+      : null;
 
   console.log("Translating:", {
     sourceLang,
@@ -1581,9 +2032,14 @@ async function handleEvent(event) {
       ? await buildDirectedMessages(textToTranslate, sourceLang, targetCommand.targetLang)
       : mode === "trilingual"
         ? await buildTrilingualMessages(textToTranslate, sourceLang)
-        : await buildBilingualMessages(textToTranslate, sourceLang, { from_lang: fromLang, to_lang: toLang });
+        : await buildDirectedMessages(textToTranslate, sourceLang, bilingualTargetLang);
 
-  if (messages.length === 0) return null;
+  if (messages.length === 0) {
+    if (event.source?.type === "user" || targetCommand) {
+      return reply(event, "暂时无法完成翻译，请稍后再试或换一种表达。");
+    }
+    return null;
+  }
 
   const charged = await chargeUserUsage(user.id, chargedChars);
   if (!charged) {
@@ -1613,18 +2069,26 @@ function buildUserUsageText(user) {
 
   const expired = isUserExpired(user);
   const remainingChars = getStoredRemainingChars(user);
+  const quotaChars = getQuotaChars(user);
+  const usedChars = getUsedChars(user);
 
   return [
     "当前额度",
     `账号：${user.name}`,
     `状态：${expired ? "已过期" : user.status}`,
     `有效期至：${formatDate(user.expires_at)}`,
+    `总购买字符：${formatNumber(quotaChars)} 字符`,
+    `已用字符：${formatNumber(usedChars)} 字符`,
     `剩余字符：${formatNumber(remainingChars)} 字符`,
+    user.mode === "trilingual"
+      ? "当前为三语模式，普通消息按输入字符 x 2 扣额度。"
+      : "当前为双语模式，普通消息按输入字符数扣额度。",
   ].join("\n");
 }
 
 function buildStatusText(event, user, options = {}) {
   const userCheck = isUserUsable(user);
+  const config = options.translationConfig || getEffectiveTranslationConfig(user, null);
   const lines = ["当前翻译状态", ""];
 
   lines.push(`来源：${getConversationLabel(event)}`);
@@ -1633,11 +2097,14 @@ function buildStatusText(event, user, options = {}) {
   lines.push(`有效：${userCheck.ok ? "是" : "否"}`);
   lines.push(`状态：${isUserExpired(user) ? "已过期" : user.status}`);
   lines.push(`有效期至：${formatDate(user.expires_at)}`);
-  lines.push(`模式：${user.mode === "trilingual" ? "三语模式" : "双语模式"}`);
-  if (user.mode === "trilingual") {
+  lines.push(`配置来源：${config.source === "conversation" ? "当前群聊" : config.source === "user" ? "用户默认" : "系统默认"}`);
+  lines.push(`模式：${config.mode === "trilingual" ? "三语模式" : "双语模式"}`);
+  if (config.mode === "trilingual") {
     lines.push("语言：中文 / ภาษาไทย / မြန်မာဘာသာ");
   } else {
-    lines.push(`语言：${getLangName(user.from_lang)} ↔ ${getLangName(user.to_lang)}`);
+    lines.push(`默认语言：${getLangName(config.from_lang)}`);
+    lines.push(`互译语言：${getLangName(config.to_lang)}`);
+    lines.push("其他语言：翻译成默认语言");
   }
   if (getConversationBindingKey(event)) {
     lines.push(`群聊自动翻译：${options.conversationTranslationEnabled === false ? "关闭" : "开启"}`);
@@ -1690,39 +2157,69 @@ const DIRECT_TRANSLATION_HELP_LINES = [
 
 function buildPublicHelpText() {
   return [
+    "常用命令",
+    "userid       查看 USERID",
+    "/usage      查看额度",
+    "/status     查看当前状态",
+    "set on      开启群聊自动翻译",
+    "set off     关闭群聊自动翻译，只保留指定翻译",
+    "set 3lang   开启中文 / 泰文 / 缅文三语模式",
+    "",
     "指定翻译方法",
     ...DIRECT_TRANSLATION_HELP_LINES,
     "",
-    "设置群内默认翻译语言",
+    "设置默认翻译语言",
+    "私聊中设置用户默认；群聊中设置当前群聊。",
+    "支持任意两种语言组合。",
+    "其他语言会翻译成第一种默认语言。",
     ...DEFAULT_TRANSLATION_PAIR_HELP_LINES,
   ].join("\n");
 }
 
-async function handleSetCommand(event, lower, user) {
+async function handleSetCommand(event, lower, user, options = {}) {
   const parts = lower.trim().split(/\s+/);
   const sub = parts[1];
+  const bindingKey = options.bindingKey || null;
+  const isConversationConfig = Boolean(bindingKey);
 
-  if (sub === "3lang") {
+  async function saveConfig(payload) {
+    if (isConversationConfig) {
+      return setConversationLanguageConfig(bindingKey, payload);
+    }
+
     const { error } = await supabase
       .from("users")
       .update({
-        mode: "trilingual",
-        from_lang: "zh",
-        to_lang: "th",
+        ...payload,
         updated_at: new Date().toISOString(),
         last_active_at: new Date().toISOString(),
       })
       .eq("id", user.id);
 
     if (error) {
-      console.error("Update user language mode failed:", error);
-      return reply(event, "切换三语模式失败，请稍后再试。");
+      console.error("Update user language config failed:", error);
+      return false;
     }
 
+    return true;
+  }
+
+  if (sub === "3lang") {
+    const saved = await saveConfig({
+      mode: "trilingual",
+      from_lang: "zh",
+      to_lang: "th",
+    });
+
+    if (!saved) {
+      return reply(event, isConversationConfig ? "切换当前群聊三语模式失败，请稍后再试。" : "切换三语模式失败，请稍后再试。");
+    }
+
+    await touchUser(user.id);
     return reply(
       event,
       [
-        "三语模式已开启。",
+        isConversationConfig ? "当前群聊三语模式已开启。" : "三语模式已开启。",
         "中文 / ภาษาไทย / မြန်မာဘာသာ 三语互译。",
         "每条消息按 输入字符数 x 2 扣额度。",
         "",
@@ -1734,29 +2231,36 @@ async function handleSetCommand(event, lower, user) {
   if (parts.length === 3) {
     const a = normalizeCode(parts[1]);
     const b = normalizeCode(parts[2]);
-    const pairKey = [a, b].sort().join("|");
 
-    if (!VALID_LANG_PAIRS.has(pairKey)) {
-      return reply(event, buildSetHelpText("不支持该语言对，可用命令："));
+    if (!isSupportedDefaultLang(a) || !isSupportedDefaultLang(b)) {
+      return reply(event, buildSetHelpText("不支持该语言，可用命令示例："));
     }
 
-    const { error } = await supabase
-      .from("users")
-      .update({
-        mode: "bilingual",
-        from_lang: a,
-        to_lang: b,
-        updated_at: new Date().toISOString(),
-        last_active_at: new Date().toISOString(),
-      })
-      .eq("id", user.id);
-
-    if (error) {
-      console.error("Update user language pair failed:", error);
-      return reply(event, "切换语言失败，请稍后再试。");
+    if (a === b) {
+      return reply(event, "默认语言和互译语言不能相同。");
     }
 
-    return reply(event, `已切换：${getLangName(a)} ↔ ${getLangName(b)}\n\n发送 set 3lang 可切换到三语模式。`);
+    const saved = await saveConfig({
+      mode: "bilingual",
+      from_lang: a,
+      to_lang: b,
+    });
+
+    if (!saved) {
+      return reply(event, isConversationConfig ? "切换当前群聊语言失败，请稍后再试。" : "切换语言失败，请稍后再试。");
+    }
+
+    await touchUser(user.id);
+    return reply(
+      event,
+      [
+        `${isConversationConfig ? "当前群聊已切换" : "已切换"}：${getLangName(a)} ↔ ${getLangName(b)}`,
+        `默认语言：${getLangName(a)}`,
+        `其他语言会翻译成：${getLangName(a)}`,
+        "",
+        "发送 set 3lang 可切换到三语模式。",
+      ].join("\n")
+    );
   }
 
   await touchUser(user.id);
@@ -1770,6 +2274,9 @@ function buildSetHelpText(title) {
     ...DIRECT_TRANSLATION_HELP_LINES,
     "",
     "可设置的默认翻译语言：",
+    "私聊中设置用户默认；群聊中设置当前群聊。",
+    "支持任意两种语言组合。",
+    "其他语言会翻译成第一种默认语言。",
     ...DEFAULT_TRANSLATION_PAIR_HELP_LINES,
     "",
     "set on       开启群聊自动翻译",
@@ -1782,20 +2289,8 @@ function buildSetHelpText(title) {
 }
 
 async function buildBilingualMessages(text, sourceLang, activation) {
-  const langFrom = normalizeCode(activation.from_lang || "zh");
-  const langTo = normalizeCode(activation.to_lang || "th");
-
-  let targetLang;
-  if (sourceLang === langFrom) {
-    targetLang = langTo;
-  } else if (sourceLang === langTo) {
-    targetLang = langFrom;
-  } else {
-    targetLang = "zh";
-  }
-
-  if (sourceLang === targetLang) return [];
-
+  const targetLang = getBilingualTargetLang(sourceLang, activation);
+  if (!targetLang) return [];
   return buildDirectedMessages(text, sourceLang, targetLang);
 }
 
