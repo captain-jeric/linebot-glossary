@@ -254,6 +254,10 @@ function isUserIdCommand(lower) {
   return lower === "userid" || lower === "/userid" || lower === "user id" || lower === "/user id";
 }
 
+function isGroupIdCommand(lower) {
+  return lower === "/groupid" || lower === "groupid" || lower === "group id" || lower === "/group id";
+}
+
 function isStatusCommand(lower) {
   return lower === "/status" || lower === "/lang" || lower === "/状态";
 }
@@ -309,6 +313,25 @@ function addMonthsToDateString(dateString, months) {
 
 function defaultExpiryDate() {
   return addMonthsToDateString(getBangkokDateString(), 12);
+}
+
+function parseExpiryMonths(value, fallback = 12) {
+  const parsed = Number.parseInt(value || String(fallback), 10);
+  return [1, 3, 6, 9, 12].includes(parsed) ? parsed : fallback;
+}
+
+function isDateStringAfter(a, b) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(a || "")) && String(a) > String(b || "");
+}
+
+function resolveExpiryDateFromDuration(body, fallbackMonths = 12) {
+  const months = parseExpiryMonths(body.expiry_months, fallbackMonths);
+  const calculatedDate = addMonthsToDateString(getBangkokDateString(), months);
+  const customDate = String(body.expires_at || "").trim();
+  const maxStandardDate = addMonthsToDateString(getBangkokDateString(), 12);
+
+  if (isDateStringAfter(customDate, maxStandardDate)) return customDate;
+  return calculatedDate;
 }
 
 function formatDate(value) {
@@ -817,6 +840,13 @@ function requireAdmin(req, res, next) {
 }
 
 function normalizeUserInput(body, existing = {}) {
+  const existingExpiryDate = formatDateInput(existing.expires_at);
+  const hasExistingUser = Boolean(existing.id || existing.line_user_id);
+  const expiryDate =
+    body.expiry_months !== undefined && !hasExistingUser
+      ? resolveExpiryDateFromDuration(body, 12)
+      : String(body.expires_at || existingExpiryDate || defaultExpiryDate()).trim();
+
   return {
     line_user_id: String(body.line_user_id || "").trim(),
     name: String(body.name || "").trim(),
@@ -832,7 +862,7 @@ function normalizeUserInput(body, existing = {}) {
       body.used_chars === undefined
         ? parseNonNegativeInteger(existing.used_chars)
         : parseNonNegativeInteger(body.used_chars),
-    expires_at: normalizeExpiryDate(body.expires_at || formatDateInput(existing.expires_at) || defaultExpiryDate()),
+    expires_at: normalizeExpiryDate(expiryDate),
     notes: String(body.notes || "").trim() || null,
   };
 }
@@ -902,11 +932,6 @@ function buildAdminRedirectWithRenewUser(token, message, lineUserId) {
   return `${query ? `/admin?${query}` : "/admin"}#recharge`;
 }
 
-function parseAdminListLimit(value) {
-  const parsed = Number.parseInt(value || "20", 10);
-  return [20, 50, 100].includes(parsed) ? parsed : 20;
-}
-
 function sanitizeAdminSearchTerm(value) {
   return String(value || "").trim().replace(/[,%]/g, " ").slice(0, 80);
 }
@@ -917,12 +942,19 @@ function applyUserSearch(query, searchTerm) {
   return query.or(`line_user_id.ilike.${pattern},name.ilike.${pattern},notes.ilike.${pattern}`);
 }
 
-async function loadConversationBindings(limit = 50) {
-  const { data, error } = await supabase
+async function loadConversationBindings(limit = 50, search = "") {
+  const searchTerm = sanitizeAdminSearchTerm(search);
+  let query = supabase
     .from("conversation_users")
     .select("*")
     .order("updated_at", { ascending: false })
     .limit(limit);
+
+  if (searchTerm) {
+    query = query.ilike("conversation_id", `%${searchTerm}%`);
+  }
+
+  const { data, error } = await query;
 
   if (error) throw error;
 
@@ -960,11 +992,12 @@ async function loadRenewalHistory(userId, limit = 10) {
   return data || [];
 }
 
-async function loadAdminData(renewUserId = "", listLimit = 20, search = "") {
+async function loadAdminData(renewUserId = "", search = "", conversationSearch = "") {
   const now = new Date().toISOString();
   const trimmedRenewUserId = String(renewUserId || "").trim();
-  const safeLimit = parseAdminListLimit(listLimit);
+  const safeLimit = 20;
   const searchTerm = sanitizeAdminSearchTerm(search);
+  const conversationSearchTerm = sanitizeAdminSearchTerm(conversationSearch);
   const activeQuery = applyUserSearch(
     supabase
       .from("users")
@@ -987,7 +1020,7 @@ async function loadAdminData(renewUserId = "", listLimit = 20, search = "") {
   const queries = [
     activeQuery,
     inactiveQuery,
-    loadConversationBindings(),
+    loadConversationBindings(50, conversationSearchTerm),
   ];
 
   if (trimmedRenewUserId) {
@@ -1021,8 +1054,8 @@ async function loadAdminData(renewUserId = "", listLimit = 20, search = "") {
     renewalHistory,
     renewUserId: trimmedRenewUserId,
     renewUserNotFound: Boolean(trimmedRenewUserId && !renewResult?.data),
-    listLimit: safeLimit,
     searchTerm,
+    conversationSearchTerm,
   };
 }
 
@@ -1039,11 +1072,13 @@ function renderQuotaOptions(selectedValue = 100000) {
   return options.join("");
 }
 
-function renderMonthOptions(selectedValue = 12) {
-  const selected = parsePositiveInteger(selectedValue, 12);
-  return [1, 3, 6, 12]
+function renderMonthOptions(selectedValue = 12, includeBlank = false) {
+  const selected = includeBlank && !selectedValue ? "" : parsePositiveInteger(selectedValue, 12);
+  const options = [1, 3, 6, 9, 12]
     .map((value) => `<option value="${value}" ${selected === value ? "selected" : ""}>${value} 个月</option>`)
     .join("");
+  if (!includeBlank) return options;
+  return `<option value="" ${selected === "" ? "selected" : ""}>按月数调整</option>${options}`;
 }
 
 function renderLanguageOptions(selectedValue = "zh") {
@@ -1070,13 +1105,6 @@ function renderOptionalModeOptions(selectedValue = "") {
     `<option value="bilingual" ${selected === "bilingual" ? "selected" : ""}>双语模式</option>`,
     `<option value="trilingual" ${selected === "trilingual" ? "selected" : ""}>三语模式</option>`,
   ].join("");
-}
-
-function renderListLimitOptions(selectedValue = 20) {
-  const selected = parseAdminListLimit(selectedValue);
-  return [20, 50, 100]
-    .map((value) => `<option value="${value}" ${selected === value ? "selected" : ""}>${value} 条</option>`)
-    .join("");
 }
 
 function renderReadonlyMetric(label, value) {
@@ -1191,7 +1219,12 @@ function renderUserRows(users, token) {
               <label>互译语言<select name="to_lang">${renderLanguageOptions(user.to_lang)}</select></label>
               <label>总购买字符<input name="quota_chars" type="number" min="0" step="1" value="${quotaChars}" required></label>
               <label>已用字符<input name="used_chars" type="number" min="0" step="1" value="${usedChars}" required></label>
-              <label>有效期至<input name="expires_at" type="date" value="${escapeHtml(formatDateInput(user.expires_at))}" required></label>
+              <label>有效期
+                <select name="expiry_months" data-expiry-months data-expiry-target="user-expiry-${escapeHtml(user.id)}">${renderMonthOptions("", true)}</select>
+              </label>
+              <label>有效期至
+                <input id="user-expiry-${escapeHtml(user.id)}" name="expires_at" type="date" value="${escapeHtml(formatDateInput(user.expires_at))}" required>
+              </label>
               <label class="wide">备注<input name="notes" value="${escapeHtml(user.notes || "")}"></label>
               <div class="form-actions edit-actions">
                 <button type="submit">保存用户</button>
@@ -1283,10 +1316,10 @@ function renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, renewal
                         <select name="recharge_chars">${renderQuotaOptions(100000)}</select>
                       </label>
                       <label>套餐时长
-                        <select name="recharge_months">${renderMonthOptions(12)}</select>
+                        <select name="recharge_months" data-expiry-months data-expiry-target="recharge-expiry">${renderMonthOptions(12)}</select>
                       </label>
                       <label>充值后有效期
-                        <input name="expires_at" type="date">
+                        <input id="recharge-expiry" name="expires_at" type="date" value="${escapeHtml(nextExpiry)}">
                       </label>
                       <label class="wide">备注<input name="note" placeholder="收款/订单备注"></label>
                     </div>
@@ -1371,9 +1404,8 @@ function renderConversationRows(conversationBindings, token) {
   </div>`;
 }
 
-function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, renewUser, renewUserId, renewUserNotFound, renewalHistory, listLimit, searchTerm, token, message, adminEmail }) {
+function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, renewUser, renewUserId, renewUserNotFound, renewalHistory, searchTerm, conversationSearchTerm, token, message, adminEmail }) {
   const defaultExpiry = defaultExpiryDate();
-  const safeListLimit = parseAdminListLimit(listLimit);
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1435,6 +1467,7 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
     .list-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 24px; flex-wrap: wrap; }
     .list-toolbar h2 { margin: 0; }
     .limit-form, .search-form { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+    .search-form label { width: min(420px, 100%); }
     .limit-form label { width: 130px; }
     .form-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
     .recharge-actions { justify-content: flex-end; margin-top: 24px; }
@@ -1451,7 +1484,7 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
       .wide { grid-column: span 1; }
       .list-toolbar { align-items: stretch; flex-direction: column; }
       .limit-form, .search-form { align-items: stretch; }
-      .limit-form label { width: 100%; }
+      .limit-form label, .search-form label { width: 100%; }
       summary { align-items: flex-start; flex-direction: column; }
       .summary-stats { justify-content: flex-start; }
       main { padding: 14px; }
@@ -1480,7 +1513,10 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
           <input type="hidden" name="mode" value="bilingual">
           <label>默认语言<select name="from_lang">${renderLanguageOptions("zh")}</select></label>
           <label>互译语言<select name="to_lang">${renderLanguageOptions("th")}</select></label>
-          <label>有效期至<input name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}" readonly></label>
+          <label>有效期
+            <select name="expiry_months" data-expiry-months data-expiry-target="create-expiry">${renderMonthOptions(12)}</select>
+          </label>
+          <label>有效期至<input id="create-expiry" name="expires_at" type="date" value="${escapeHtml(defaultExpiry)}"></label>
           <input type="hidden" name="used_chars" value="0">
           <div class="full inline-row create-actions">
             <label>备注<input name="notes" placeholder="收款/套餐/客户备注"></label>
@@ -1493,25 +1529,65 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
     ${renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, renewalHistory, token })}
 
     <div class="list-toolbar">
-      <h2>有效用户（即将到期优先，前 ${safeListLimit} 条）</h2>
+      <h2>有效用户（即将到期优先）</h2>
       <form method="get" action="/admin" class="search-form">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         ${renewUserId ? `<input type="hidden" name="renew_userid" value="${escapeHtml(renewUserId)}">` : ""}
+        ${conversationSearchTerm ? `<input type="hidden" name="conversation_search" value="${escapeHtml(conversationSearchTerm)}">` : ""}
         <label>搜索用户<input name="search" value="${escapeHtml(searchTerm || "")}" placeholder="USERID / 用户名 / 备注"></label>
-        <label>显示数量<select name="limit">${renderListLimitOptions(safeListLimit)}</select></label>
-        <button type="submit" class="secondary">应用</button>
+        <button type="submit" class="secondary">搜索</button>
       </form>
     </div>
     ${renderUserRows(activeUsers, token) || '<section class="panel">暂无有效用户。</section>'}
 
-    <h2>过期用户（刚刚过期优先，前 ${safeListLimit} 条）</h2>
+    <h2>过期用户（刚刚过期优先）</h2>
     ${renderUserRows(expiredUsers, token) || '<section class="panel">暂无过期用户。</section>'}
 
     <section id="conversations" class="panel">
       <h2>群聊绑定管理</h2>
+      <form method="get" action="/admin#conversations" class="search-form">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        ${renewUserId ? `<input type="hidden" name="renew_userid" value="${escapeHtml(renewUserId)}">` : ""}
+        ${searchTerm ? `<input type="hidden" name="search" value="${escapeHtml(searchTerm)}">` : ""}
+        <label>搜索群聊ID<input name="conversation_search" value="${escapeHtml(conversationSearchTerm || "")}" placeholder="groupId / roomId"></label>
+        <button type="submit" class="secondary">搜索</button>
+      </form>
       ${renderConversationRows(conversationBindings, token)}
     </section>
   </main>
+  <script>
+    const expiryBaseDate = "${escapeHtml(getBangkokDateString())}";
+
+    function formatBangkokDate(date) {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "${BILLING_TIME_ZONE}",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).formatToParts(date);
+      const year = parts.find((part) => part.type === "year")?.value || "";
+      const month = parts.find((part) => part.type === "month")?.value || "";
+      const day = parts.find((part) => part.type === "day")?.value || "";
+      return year && month && day ? year + "-" + month + "-" + day : "";
+    }
+
+    function addMonthsToExpiryDate(dateString, months) {
+      const base = new Date(dateString + "T12:00:00+07:00");
+      const originalDay = base.getDate();
+      const next = new Date(base);
+      next.setMonth(next.getMonth() + Number.parseInt(months || "12", 10));
+      if (next.getDate() !== originalDay) next.setDate(0);
+      return formatBangkokDate(next);
+    }
+
+    document.querySelectorAll("[data-expiry-months]").forEach((select) => {
+      select.addEventListener("change", () => {
+        const target = document.getElementById(select.dataset.expiryTarget || "");
+        if (!select.value) return;
+        if (target) target.value = addMonthsToExpiryDate(expiryBaseDate, select.value);
+      });
+    });
+  </script>
 </body>
 </html>`;
 }
@@ -1628,7 +1704,7 @@ app.get("/admin/logout", (_req, res) => {
 
 app.get("/admin", requireAdmin, async (req, res) => {
   try {
-    const data = await loadAdminData(req.query.renew_userid || "", req.query.limit || "20", req.query.search || "");
+    const data = await loadAdminData(req.query.renew_userid || "", req.query.search || "", req.query.conversation_search || "");
     res.status(200).send(
       renderAdminPage({
         ...data,
@@ -1716,7 +1792,6 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
   const token = adminTokenFromRequest(req);
   const lineUserId = String(req.body.line_user_id || "").trim();
   const rechargeChars = parseNonNegativeInteger(req.body.recharge_chars);
-  const rechargeMonths = parsePositiveInteger(req.body.recharge_months, 12);
   const note = String(req.body.note || "").trim();
 
   if (rechargeChars <= 0) {
@@ -1735,8 +1810,10 @@ app.post("/admin/users/:id/recharge", requireAdmin, async (req, res) => {
     return;
   }
 
-  const customExpiryDate = String(req.body.expires_at || "").trim();
-  const nextExpiryDate = customExpiryDate || addMonthsToDateString(getBangkokDateString(), rechargeMonths);
+  const nextExpiryDate = resolveExpiryDateFromDuration({
+    expiry_months: req.body.recharge_months,
+    expires_at: req.body.expires_at,
+  }, 12);
   if (Number.isNaN(new Date(normalizeExpiryDate(nextExpiryDate)).getTime())) {
     res.redirect(buildAdminRedirectWithRenewUser(token, "充值后有效期格式不正确。", lineUserId));
     return;
@@ -1941,6 +2018,10 @@ async function handleEvent(event) {
     return reply(event, buildUserIdText(lineUserId, user));
   }
 
+  if (isGroupIdCommand(lower)) {
+    return reply(event, buildGroupIdText(event, lineUserId));
+  }
+
   if (isUsageCommand(lower)) {
     return reply(event, buildUserUsageText(user));
   }
@@ -2062,6 +2143,18 @@ function buildUserIdText(lineUserId, user) {
   return [`USERID：${lineUserId}`, `发送 /usage 查看额度。`].join("\n");
 }
 
+function buildGroupIdText(event, lineUserId) {
+  if (event.source?.type === "group") {
+    return [`群聊ID：${event.source.groupId || ""}`, "可复制该 ID 到后台搜索群聊绑定。"].join("\n");
+  }
+
+  if (event.source?.type === "room") {
+    return [`聊天室ID：${event.source.roomId || ""}`, "可复制该 ID 到后台搜索群聊绑定。"].join("\n");
+  }
+
+  return ["当前是私聊，没有群聊ID。", `USERID：${lineUserId}`].join("\n");
+}
+
 function buildUserUsageText(user) {
   if (!user) {
     return [`当前账号尚未开通权限。`, `请联系管理员添加权限。`, `发送 userid 查看 USERID。`].join("\n");
@@ -2159,6 +2252,7 @@ function buildPublicHelpText() {
   return [
     "常用命令",
     "userid       查看 USERID",
+    "/groupid    查看当前群聊ID",
     "/usage      查看额度",
     "/status     查看当前状态",
     "set on      开启群聊自动翻译",
@@ -2284,6 +2378,7 @@ function buildSetHelpText(title) {
     "",
     "/status      查看当前状态",
     "/usage       查看额度",
+    "/groupid     查看当前群聊ID",
     "userid       查看 USERID",
   ].join("\n");
 }
