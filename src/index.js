@@ -320,17 +320,12 @@ function parseExpiryMonths(value, fallback = 12) {
   return [1, 3, 6, 9, 12].includes(parsed) ? parsed : fallback;
 }
 
-function isDateStringAfter(a, b) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(a || "")) && String(a) > String(b || "");
-}
-
 function resolveExpiryDateFromDuration(body, fallbackMonths = 12) {
   const months = parseExpiryMonths(body.expiry_months, fallbackMonths);
   const calculatedDate = addMonthsToDateString(getBangkokDateString(), months);
   const customDate = String(body.expires_at || "").trim();
-  const maxStandardDate = addMonthsToDateString(getBangkokDateString(), 12);
 
-  if (isDateStringAfter(customDate, maxStandardDate)) return customDate;
+  if (customDate) return customDate;
   return calculatedDate;
 }
 
@@ -998,28 +993,16 @@ async function loadAdminData(renewUserId = "", search = "", conversationSearch =
   const safeLimit = 20;
   const searchTerm = sanitizeAdminSearchTerm(search);
   const conversationSearchTerm = sanitizeAdminSearchTerm(conversationSearch);
-  const activeQuery = applyUserSearch(
+  const usersQuery = applyUserSearch(
     supabase
       .from("users")
       .select("*")
-      .eq("status", "active")
-      .gte("expires_at", now)
       .order("expires_at", { ascending: true })
       .limit(safeLimit),
     searchTerm
   );
-  const inactiveQuery = applyUserSearch(
-    supabase
-      .from("users")
-      .select("*")
-      .or(`expires_at.lt.${now},status.eq.paused`)
-      .order("expires_at", { ascending: false })
-      .limit(safeLimit),
-    searchTerm
-  );
   const queries = [
-    activeQuery,
-    inactiveQuery,
+    usersQuery,
     loadConversationBindings(50, conversationSearchTerm),
   ];
 
@@ -1035,20 +1018,17 @@ async function loadAdminData(renewUserId = "", search = "", conversationSearch =
 
   const results = await Promise.all(queries);
   const [
-    { data: activeUsers, error: activeError },
-    { data: expiredUsers, error: expiredError },
+    { data: users, error: usersError },
     conversationBindings,
   ] = results;
-  const renewResult = results[3];
+  const renewResult = results[2];
 
-  if (activeError) throw activeError;
-  if (expiredError) throw expiredError;
+  if (usersError) throw usersError;
   if (renewResult?.error) throw renewResult.error;
   const renewalHistory = await loadRenewalHistory(renewResult?.data?.id);
 
   return {
-    activeUsers: activeUsers || [],
-    expiredUsers: expiredUsers || [],
+    users: users || [],
     conversationBindings,
     renewUser: renewResult?.data || null,
     renewalHistory,
@@ -1404,7 +1384,7 @@ function renderConversationRows(conversationBindings, token) {
   </div>`;
 }
 
-function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, renewUser, renewUserId, renewUserNotFound, renewalHistory, searchTerm, conversationSearchTerm, token, message, adminEmail }) {
+function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, renewUserNotFound, renewalHistory, searchTerm, conversationSearchTerm, token, message, adminEmail }) {
   const defaultExpiry = defaultExpiryDate();
 
   return `<!doctype html>
@@ -1432,6 +1412,8 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
     .create-actions { grid-template-columns: minmax(0, calc(50% - 6px)) auto; justify-content: start; }
     label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; color: #4b5870; }
     input, select { box-sizing: border-box; width: 100%; height: 38px; padding: 8px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; line-height: 20px; background: #fff; }
+    input[type="date"] { appearance: auto; cursor: pointer; }
+    select { appearance: auto; cursor: pointer; }
     input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 auto; }
     code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
     button { width: 92px; min-width: 92px; height: 38px; padding: 0 13px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; white-space: nowrap; }
@@ -1466,8 +1448,9 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
     .renew-card h3 { margin: 0 0 12px; font-size: 16px; }
     .list-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 24px; flex-wrap: wrap; }
     .list-toolbar h2 { margin: 0; }
-    .limit-form, .search-form { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+    .limit-form, .search-form { display: flex; align-items: end; gap: 10px; flex-wrap: nowrap; }
     .search-form label { width: min(420px, 100%); }
+    .search-form button { flex: 0 0 auto; }
     .limit-form label { width: 130px; }
     .form-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
     .recharge-actions { justify-content: flex-end; margin-top: 24px; }
@@ -1485,6 +1468,8 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
       .list-toolbar { align-items: stretch; flex-direction: column; }
       .limit-form, .search-form { align-items: stretch; }
       .limit-form label, .search-form label { width: 100%; }
+      .search-form { flex-wrap: nowrap; }
+      .search-form label { flex: 1 1 auto; }
       summary { align-items: flex-start; flex-direction: column; }
       .summary-stats { justify-content: flex-start; }
       main { padding: 14px; }
@@ -1529,7 +1514,7 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
     ${renderRenewalPanel({ renewUser, renewUserId, renewUserNotFound, renewalHistory, token })}
 
     <div class="list-toolbar">
-      <h2>有效用户（即将到期优先）</h2>
+      <h2>用户管理</h2>
       <form method="get" action="/admin" class="search-form">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         ${renewUserId ? `<input type="hidden" name="renew_userid" value="${escapeHtml(renewUserId)}">` : ""}
@@ -1538,10 +1523,7 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
         <button type="submit" class="secondary">搜索</button>
       </form>
     </div>
-    ${renderUserRows(activeUsers, token) || '<section class="panel">暂无有效用户。</section>'}
-
-    <h2>过期用户（刚刚过期优先）</h2>
-    ${renderUserRows(expiredUsers, token) || '<section class="panel">暂无过期用户。</section>'}
+    ${renderUserRows(users, token) || '<section class="panel">暂无用户。</section>'}
 
     <section id="conversations" class="panel">
       <h2>群聊绑定管理</h2>
@@ -1586,6 +1568,14 @@ function renderAdminPage({ activeUsers, expiredUsers, conversationBindings, rene
         if (!select.value) return;
         if (target) target.value = addMonthsToExpiryDate(expiryBaseDate, select.value);
       });
+    });
+
+    document.querySelectorAll('input[type="date"]').forEach((input) => {
+      const openPicker = () => {
+        if (typeof input.showPicker === "function") input.showPicker();
+      };
+      input.addEventListener("click", openPicker);
+      input.addEventListener("focus", openPicker);
     });
   </script>
 </body>
