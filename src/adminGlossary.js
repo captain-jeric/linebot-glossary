@@ -1,7 +1,9 @@
 const { supabase } = require("./db");
 
 const GLOSSARY_LANGS = ["zh", "zh-TW", "en", "th", "my", "ja"];
+const FREQUENT_TRANSLATION_LANGS = ["zh", "zh-TW", "th", "my", "en", "ja", "ko", "ms", "id", "vi", "hi", "ar", "ru", "de", "fr", "es"];
 const TERM_STATUSES = new Set(["draft", "active", "deprecated"]);
+const FREQUENT_TRANSLATION_STATUSES = new Set(["draft", "active", "disabled"]);
 const RISK_LEVELS = new Set(["low", "medium", "high"]);
 const TERM_SOURCES = new Set(["manual", "ai", "import", "suggestion"]);
 
@@ -172,6 +174,7 @@ function renderAdminShell({ title, token, message, adminEmail, content }) {
     <nav>
       <a href="/admin${tokenParam}">用户管理</a>
       <a href="/admin${tokenParam}#conversations">群聊绑定</a>
+      <a href="/admin/frequent-translations${tokenParam}">高频直译</a>
       <a href="/admin/suggestions${tokenParam}">候选词</a>
       <a href="/admin/glossary${tokenParam}">术语库</a>
     </nav>
@@ -247,6 +250,19 @@ function renderRiskOptions(selected) {
     .join("");
 }
 
+function renderFrequentTranslationStatusOptions(selected) {
+  return ["draft", "active", "disabled"]
+    .map((status) => `<option value="${status}" ${selected === status ? "selected" : ""}>${status}</option>`)
+    .join("");
+}
+
+function renderLanguageSelectOptions(selected) {
+  const normalized = String(selected || "");
+  return FREQUENT_TRANSLATION_LANGS
+    .map((lang) => `<option value="${lang}" ${normalized === lang ? "selected" : ""}>${lang}</option>`)
+    .join("");
+}
+
 function renderSourceOptions(selected) {
   return ["manual", "ai", "import", "suggestion"]
     .map((source) => `<option value="${source}" ${selected === source ? "selected" : ""}>${source}</option>`)
@@ -299,6 +315,148 @@ function renderTermForm({ term = {}, token, action, title }) {
       </div>
     </form>
   </section>`;
+}
+
+async function loadSentenceCandidates(status = "candidate") {
+  let query = supabase
+    .from("sentence_candidates")
+    .select("*")
+    .order("count", { ascending: false })
+    .order("last_seen_at", { ascending: false })
+    .limit(100);
+
+  if (status) query = query.eq("status", status);
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return data || [];
+}
+
+async function loadFrequentTranslations(status = "") {
+  let query = supabase
+    .from("frequent_translations")
+    .select("*")
+    .order("status", { ascending: true })
+    .order("hit_count", { ascending: false })
+    .order("updated_at", { ascending: false })
+    .limit(150);
+
+  if (status && FREQUENT_TRANSLATION_STATUSES.has(status)) query = query.eq("status", status);
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return data || [];
+}
+
+function renderSentenceCandidateRows(rows, token) {
+  if (!rows.length) return '<section class="panel">暂无完整句候选。</section>';
+
+  return rows.map((row) => `<details>
+    <summary>
+      <span><strong>${escapeHtml(row.source_text)}</strong> <code>${escapeHtml(row.source_lang)}</code> <span class="badge">${escapeHtml(row.status)}</span></span>
+      <span class="meta">count ${Number(row.count || 0).toLocaleString("en-US")} · 最近 ${escapeHtml(formatDate(row.last_seen_at))}</span>
+    </summary>
+    <div class="body">
+      <div class="metrics">
+        ${renderMetric("标准化整句", row.normalized_source_text)}
+        ${renderMetric("首次出现", formatDate(row.first_seen_at))}
+        ${renderMetric("最近出现", formatDate(row.last_seen_at))}
+        ${renderMetric("出现次数", Number(row.count || 0).toLocaleString("en-US"))}
+      </div>
+      <h3>Examples</h3>
+      ${renderExamples(row.examples)}
+      <form method="post" action="/admin/sentence-candidates/${escapeHtml(row.id)}/action" class="grid" style="margin-top: 12px;">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <label>目标语言
+          <select name="target_lang">${renderLanguageSelectOptions(row.source_lang === "zh" ? "th" : "zh")}</select>
+        </label>
+        <label class="wide">固定译文
+          <textarea name="translated_text" placeholder="完整句命中后直接返回的译文"></textarea>
+        </label>
+        <label class="wide">备注
+          <input name="notes" placeholder="适用场景 / 审核说明">
+        </label>
+        <div class="full actions">
+          <button type="submit" name="action" value="promote_active">转为直译</button>
+          <button type="submit" name="action" value="ignore" class="danger">忽略</button>
+        </div>
+      </form>
+    </div>
+  </details>`).join("");
+}
+
+function renderFrequentTranslationRows(rows, token) {
+  if (!rows.length) return '<section class="panel">暂无高频直译。</section>';
+
+  return rows.map((row) => `<details>
+    <summary>
+      <span><strong>${escapeHtml(row.source_text)}</strong> <code>${escapeHtml(row.source_lang)} → ${escapeHtml(row.target_lang)}</code> <span class="badge ${row.status === "disabled" ? "danger" : row.status === "draft" ? "warn" : ""}">${escapeHtml(row.status)}</span></span>
+      <span class="meta">hit ${Number(row.hit_count || 0).toLocaleString("en-US")} · 更新 ${escapeHtml(formatDate(row.updated_at))}</span>
+    </summary>
+    <div class="body">
+      <form method="post" action="/admin/frequent-translations/${escapeHtml(row.id)}" class="grid">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <label class="wide">原句
+          <textarea name="source_text" required>${escapeHtml(row.source_text)}</textarea>
+        </label>
+        <label>源语言
+          <select name="source_lang">${renderLanguageSelectOptions(row.source_lang)}</select>
+        </label>
+        <label>目标语言
+          <select name="target_lang">${renderLanguageSelectOptions(row.target_lang)}</select>
+        </label>
+        <label>状态
+          <select name="status">${renderFrequentTranslationStatusOptions(row.status)}</select>
+        </label>
+        <label class="wide">固定译文
+          <textarea name="translated_text" required>${escapeHtml(row.translated_text)}</textarea>
+        </label>
+        <label class="wide">备注
+          <input name="notes" value="${escapeHtml(row.notes || "")}">
+        </label>
+        <div class="metrics full">
+          ${renderMetric("标准化整句", row.normalized_source_text)}
+          ${renderMetric("命中次数", Number(row.hit_count || 0).toLocaleString("en-US"))}
+          ${renderMetric("最近命中", formatDate(row.last_hit_at))}
+          ${renderMetric("创建时间", formatDate(row.created_at))}
+        </div>
+        <div class="full actions">
+          <button type="submit">保存直译</button>
+        </div>
+      </form>
+    </div>
+  </details>`).join("");
+}
+
+function normalizeSentenceForAdmin(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[，。！？、；：“”‘’（）【】《》]/g, " ")
+    .replace(/[,.!?;:"'()[\]{}<>]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseFrequentTranslationInput(body, existing = {}) {
+  const sourceText = String(body.source_text || existing.source_text || "").trim();
+  return {
+    source_text: sourceText,
+    normalized_source_text: normalizeSentenceForAdmin(sourceText),
+    source_lang: FREQUENT_TRANSLATION_LANGS.includes(String(body.source_lang || "")) ? String(body.source_lang) : existing.source_lang || "und",
+    target_lang: FREQUENT_TRANSLATION_LANGS.includes(String(body.target_lang || "")) ? String(body.target_lang) : existing.target_lang || "und",
+    translated_text: String(body.translated_text || existing.translated_text || "").trim(),
+    status: FREQUENT_TRANSLATION_STATUSES.has(String(body.status || "")) ? String(body.status) : existing.status || "active",
+    notes: String(body.notes || "").trim() || null,
+  };
+}
+
+function validateFrequentTranslationPayload(payload) {
+  if (!payload.source_text || !payload.normalized_source_text) return "原句不能为空。";
+  if (!payload.translated_text) return "固定译文不能为空。";
+  if (payload.source_lang === payload.target_lang) return "源语言和目标语言不能相同。";
+  if (!FREQUENT_TRANSLATION_STATUSES.has(payload.status)) return "状态不正确。";
+  return "";
 }
 
 async function loadMessageTerms(status = "candidate") {
@@ -506,6 +664,180 @@ function renderGlossaryRows(rows, token) {
 
 function registerAdminGlossaryRoutes(app, options) {
   const { requireAdmin, adminTokenFromRequest } = options;
+
+  app.get("/admin/frequent-translations", requireAdmin, async (req, res) => {
+    try {
+      const token = adminTokenFromRequest(req);
+      const [sentenceCandidates, frequentTranslations] = await Promise.all([
+        loadSentenceCandidates(String(req.query.sentence_status || "candidate")),
+        loadFrequentTranslations(String(req.query.translation_status || "")),
+      ]);
+
+      const content = `
+        <div class="toolbar">
+          <h2>高频直译库</h2>
+        </div>
+        <section class="panel">
+          <p class="meta">完整句命中后会直接返回这里配置的固定译文，不调用翻译 API。候选词仍只用于术语库，不参与高频直译。</p>
+        </section>
+        <section class="panel">
+          <form method="post" action="/admin/frequent-translations" class="grid">
+            <input type="hidden" name="token" value="${escapeHtml(token)}">
+            <label class="wide">原句
+              <textarea name="source_text" placeholder="完整原句" required></textarea>
+            </label>
+            <label>源语言
+              <select name="source_lang">${renderLanguageSelectOptions("zh")}</select>
+            </label>
+            <label>目标语言
+              <select name="target_lang">${renderLanguageSelectOptions("th")}</select>
+            </label>
+            <label>状态
+              <select name="status">${renderFrequentTranslationStatusOptions("active")}</select>
+            </label>
+            <label class="wide">固定译文
+              <textarea name="translated_text" placeholder="命中后直接返回的译文" required></textarea>
+            </label>
+            <label class="wide">备注
+              <input name="notes" placeholder="适用场景 / 审核说明">
+            </label>
+            <div class="full actions">
+              <button type="submit">新增直译</button>
+            </div>
+          </form>
+        </section>
+        <h2>正式高频直译</h2>
+        ${renderFrequentTranslationRows(frequentTranslations, token)}
+        <h2>完整句候选</h2>
+        ${renderSentenceCandidateRows(sentenceCandidates, token)}
+      `;
+
+      res.status(200).send(renderAdminShell({
+        title: "高频直译",
+        token,
+        message: req.query.message || "",
+        adminEmail: req.adminEmail,
+        content,
+      }));
+    } catch (error) {
+      console.error("Load frequent translations failed:", error);
+      res.status(500).send("高频直译页面加载失败，请查看服务日志。");
+    }
+  });
+
+  app.post("/admin/frequent-translations", requireAdmin, async (req, res) => {
+    const token = adminTokenFromRequest(req);
+    const payload = parseFrequentTranslationInput(req.body);
+    const validationError = validateFrequentTranslationPayload(payload);
+
+    if (validationError) {
+      res.redirect(buildAdminUrl("/admin/frequent-translations", token, validationError));
+      return;
+    }
+
+    const { error } = await supabase
+      .from("frequent_translations")
+      .upsert(payload, { onConflict: "normalized_source_text,source_lang,target_lang" });
+
+    if (error) {
+      console.error("Create frequent translation failed:", error);
+      res.redirect(buildAdminUrl("/admin/frequent-translations", token, `创建失败：${error.message}`));
+      return;
+    }
+
+    res.redirect(buildAdminUrl("/admin/frequent-translations", token, "高频直译已保存。"));
+  });
+
+  app.post("/admin/frequent-translations/:id", requireAdmin, async (req, res) => {
+    const token = adminTokenFromRequest(req);
+    const { data: existing, error: loadError } = await supabase
+      .from("frequent_translations")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
+
+    if (loadError || !existing) {
+      res.redirect(buildAdminUrl("/admin/frequent-translations", token, `保存失败：${loadError?.message || "找不到该直译"}`));
+      return;
+    }
+
+    const payload = parseFrequentTranslationInput(req.body, existing);
+    const validationError = validateFrequentTranslationPayload(payload);
+
+    if (validationError) {
+      res.redirect(buildAdminUrl("/admin/frequent-translations", token, validationError));
+      return;
+    }
+
+    const { error } = await supabase
+      .from("frequent_translations")
+      .update(payload)
+      .eq("id", existing.id);
+
+    if (error) {
+      console.error("Update frequent translation failed:", error);
+      res.redirect(buildAdminUrl("/admin/frequent-translations", token, `保存失败：${error.message}`));
+      return;
+    }
+
+    res.redirect(buildAdminUrl("/admin/frequent-translations", token, "高频直译已更新。"));
+  });
+
+  app.post("/admin/sentence-candidates/:id/action", requireAdmin, async (req, res) => {
+    const token = adminTokenFromRequest(req);
+    const action = String(req.body.action || "");
+
+    try {
+      const { data: row, error } = await supabase
+        .from("sentence_candidates")
+        .select("*")
+        .eq("id", req.params.id)
+        .single();
+
+      if (error || !row) throw error || new Error("找不到完整句候选。");
+
+      if (action === "ignore") {
+        const { error: ignoreError } = await supabase
+          .from("sentence_candidates")
+          .update({ status: "ignored" })
+          .eq("id", row.id);
+        if (ignoreError) throw ignoreError;
+        res.redirect(buildAdminUrl("/admin/frequent-translations", token, "完整句候选已忽略。"));
+        return;
+      }
+
+      if (action === "promote_active") {
+        const payload = parseFrequentTranslationInput({
+          ...req.body,
+          source_text: row.source_text,
+          source_lang: row.source_lang,
+          status: "active",
+        });
+        const validationError = validateFrequentTranslationPayload(payload);
+        if (validationError) {
+          res.redirect(buildAdminUrl("/admin/frequent-translations", token, validationError));
+          return;
+        }
+
+        const { error: upsertError } = await supabase
+          .from("frequent_translations")
+          .upsert({
+            ...payload,
+            sentence_candidate_id: row.id,
+          }, { onConflict: "normalized_source_text,source_lang,target_lang" });
+        if (upsertError) throw upsertError;
+
+        await supabase.from("sentence_candidates").update({ status: "promoted" }).eq("id", row.id);
+        res.redirect(buildAdminUrl("/admin/frequent-translations", token, "完整句已转为高频直译。"));
+        return;
+      }
+
+      res.redirect(buildAdminUrl("/admin/frequent-translations", token, "未知操作。"));
+    } catch (error) {
+      console.error("Handle sentence candidate action failed:", error);
+      res.redirect(buildAdminUrl("/admin/frequent-translations", token, `操作失败：${error.message}`));
+    }
+  });
 
   app.get("/admin/suggestions", requireAdmin, async (req, res) => {
     try {
