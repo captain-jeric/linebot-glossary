@@ -3,6 +3,8 @@
 !.env.example
 
 OPERATION_MANUAL.md
+PROJECT_DOCUMENTATION.md
+USER_OPERATION_MANUAL.md
 
 secrets/
 node_modules/

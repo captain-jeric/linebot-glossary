@@ -1,5 +1,5 @@
-# LINE Translate Bot
+# linebot-Glossary
 
-Public repository placeholder.
+LINE translation and glossary management bot.
 
 Deployment notes and operational details are intentionally not published here.

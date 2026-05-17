@@ -1,5 +1,5 @@
 // =========================
-// LINE 翻译机器人
+// linebot-Glossary
 // USERID 授权版 · Supabase/PostgreSQL 持久化
 // =========================
 
@@ -7,7 +7,9 @@ const express = require("express");
 const line = require("@line/bot-sdk");
 const crypto = require("crypto");
 const { Translate } = require("@google-cloud/translate").v2;
-const { createClient } = require("@supabase/supabase-js");
+const { supabase } = require("./db");
+const { registerAdminGlossaryRoutes } = require("./adminGlossary");
+const { recordMessageAnalysis } = require("./glossary");
 
 const PORT = process.env.PORT || 8080;
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
@@ -50,17 +52,6 @@ for (const envName of requiredEnvNames) {
 const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
 });
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  }
-);
 
 function parseJsonEnv(name) {
   const value = process.env[name];
@@ -1319,7 +1310,7 @@ function renderAdminLogin(errorMessage) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LINE 翻译机器人管理</title>
+  <title>linebot-Glossary 管理</title>
   <style>
     body { margin: 0; font-family: Arial, "PingFang SC", sans-serif; background: #f5f7fb; color: #172033; }
     main { max-width: 420px; margin: 12vh auto; padding: 24px; background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; }
@@ -1607,7 +1598,7 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LINE 翻译机器人管理</title>
+  <title>linebot-Glossary 管理</title>
   <style>
     :root { color-scheme: light; }
     body { margin: 0; font-family: Arial, "PingFang SC", sans-serif; background: #f4f6fa; color: #172033; }
@@ -1692,7 +1683,11 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
   </style>
 </head>
 <body>
-  <header><h1>LINE 翻译机器人管理</h1><p class="meta">当前管理员：${escapeHtml(adminEmail || "unknown")} · <a href="/admin/logout">退出</a></p></header>
+  <header>
+    <h1>linebot-Glossary 管理</h1>
+    <p class="meta">当前管理员：${escapeHtml(adminEmail || "unknown")} · <a href="/admin/logout">退出</a></p>
+    <p class="meta"><a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}">用户管理</a> · <a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}#conversations">群聊绑定</a> · <a href="/admin/suggestions${token ? `?token=${encodeURIComponent(token)}` : ""}">候选词</a> · <a href="/admin/glossary${token ? `?token=${encodeURIComponent(token)}` : ""}">术语库</a></p>
+  </header>
   <main>
     ${message ? `<div class="message">${escapeHtml(message)}</div>` : ""}
 
@@ -1812,7 +1807,7 @@ const app = express();
 app.get("/health", (_req, res) => {
   res.status(200).json({
     ok: true,
-    service: "line-translate-bot-userid",
+    service: "linebot-glossary",
     cacheSize: translationCache.size,
     database: "supabase",
   });
@@ -1905,6 +1900,11 @@ app.get("/admin/auth/google/callback", async (req, res) => {
 app.get("/admin/logout", (_req, res) => {
   res.setHeader("Set-Cookie", buildCookie(ADMIN_SESSION_COOKIE, "", 0));
   res.redirect("/admin");
+});
+
+registerAdminGlossaryRoutes(app, {
+  requireAdmin,
+  adminTokenFromRequest,
 });
 
 app.get("/admin", requireAdmin, async (req, res) => {
@@ -2297,6 +2297,18 @@ async function handleEvent(event) {
 
   const sourceLang = normalizeCode(await detectLang(textToTranslate));
   if (sourceLang === "und") return null;
+
+  recordMessageAnalysis({
+    text: textToTranslate,
+    language: sourceLang,
+    sourceType: event.source?.type || "",
+    conversationId: bindingKey?.conversationId || "",
+  }).catch((error) => {
+    console.warn("Glossary analysis failed:", {
+      error: error.message,
+      time: new Date().toISOString(),
+    });
+  });
 
   const bilingualTargetLang =
     !targetCommand && mode === "bilingual"

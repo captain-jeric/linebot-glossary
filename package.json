@@ -1,7 +1,7 @@
 {
-  "name": "linetranslate",
+  "name": "linebot-glossary",
   "version": "1.0.0",
-  "description": "LINE group chat translation bot",
+  "description": "LINE translation and glossary management bot",
   "main": "src/index.js",
   "private": true,
   "scripts": {
