@@ -354,16 +354,19 @@ function renderSentenceCandidateRows(rows, token) {
   return rows.map((row) => `<details>
     <summary>
       <span><strong>${escapeHtml(row.source_text)}</strong> <code>${escapeHtml(row.source_lang)}</code> <span class="badge">${escapeHtml(row.status)}</span></span>
-      <span class="meta">count ${Number(row.count || 0).toLocaleString("en-US")} · 最近 ${escapeHtml(formatDate(row.last_seen_at))}</span>
+      <span class="meta">出现 ${Number(row.count || 0).toLocaleString("en-US")} 次 · 可转为直译</span>
     </summary>
     <div class="body">
       <div class="metrics">
+        ${renderMetric("当前阶段", "完整句候选")}
+        ${renderMetric("下一步", "填写固定译文后转为直译")}
         ${renderMetric("标准化整句", row.normalized_source_text)}
+        ${renderMetric("出现次数", Number(row.count || 0).toLocaleString("en-US"))}
         ${renderMetric("首次出现", formatDate(row.first_seen_at))}
         ${renderMetric("最近出现", formatDate(row.last_seen_at))}
-        ${renderMetric("出现次数", Number(row.count || 0).toLocaleString("en-US"))}
+        ${renderMetric("命中效果", "转为直译后不调用 API")}
       </div>
-      <h3>Examples</h3>
+      <h3>原句样本</h3>
       ${renderExamples(row.examples)}
       <form method="post" action="/admin/sentence-candidates/${escapeHtml(row.id)}/action" class="grid" style="margin-top: 12px;">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
@@ -371,10 +374,10 @@ function renderSentenceCandidateRows(rows, token) {
           <select name="target_lang">${renderLanguageSelectOptions(row.source_lang === "zh" ? "th" : "zh")}</select>
         </label>
         <label class="wide">固定译文
-          <textarea name="translated_text" placeholder="完整句命中后直接返回的译文"></textarea>
+          <textarea name="translated_text" placeholder="例如：这句话下次完整命中时，机器人直接回复这里的译文"></textarea>
         </label>
         <label class="wide">备注
-          <input name="notes" placeholder="适用场景 / 审核说明">
+          <input name="notes" placeholder="适用场景 / 谁审核 / 为什么固定翻译">
         </label>
         <div class="full actions">
           <button type="submit" name="action" value="promote_active">转为直译</button>
@@ -391,7 +394,7 @@ function renderFrequentTranslationRows(rows, token) {
   return rows.map((row) => `<details>
     <summary>
       <span><strong>${escapeHtml(row.source_text)}</strong> <code>${escapeHtml(row.source_lang)} → ${escapeHtml(row.target_lang)}</code> <span class="badge ${row.status === "disabled" ? "danger" : row.status === "draft" ? "warn" : ""}">${escapeHtml(row.status)}</span></span>
-      <span class="meta">hit ${Number(row.hit_count || 0).toLocaleString("en-US")} · 更新 ${escapeHtml(formatDate(row.updated_at))}</span>
+      <span class="meta">已直译命中 ${Number(row.hit_count || 0).toLocaleString("en-US")} 次 · 省 API</span>
     </summary>
     <div class="body">
       <form method="post" action="/admin/frequent-translations/${escapeHtml(row.id)}" class="grid">
@@ -415,6 +418,9 @@ function renderFrequentTranslationRows(rows, token) {
           <input name="notes" value="${escapeHtml(row.notes || "")}">
         </label>
         <div class="metrics full">
+          ${renderMetric("当前阶段", row.status === "active" ? "已启用直译" : row.status === "draft" ? "草稿待启用" : "已停用")}
+          ${renderMetric("命中方式", "完整句 + 源语言 + 目标语言")}
+          ${renderMetric("命中结果", row.status === "active" ? "直接返回固定译文" : "不会用于直译")}
           ${renderMetric("标准化整句", row.normalized_source_text)}
           ${renderMetric("命中次数", Number(row.hit_count || 0).toLocaleString("en-US"))}
           ${renderMetric("最近命中", formatDate(row.last_hit_at))}
@@ -672,19 +678,31 @@ function registerAdminGlossaryRoutes(app, options) {
         loadSentenceCandidates(String(req.query.sentence_status || "candidate")),
         loadFrequentTranslations(String(req.query.translation_status || "")),
       ]);
+      const activeTranslationCount = frequentTranslations.filter((row) => row.status === "active").length;
+      const totalDirectHits = frequentTranslations.reduce((sum, row) => sum + Number(row.hit_count || 0), 0);
+      const candidateOccurrences = sentenceCandidates.reduce((sum, row) => sum + Number(row.count || 0), 0);
 
       const content = `
         <div class="toolbar">
           <h2>高频直译库</h2>
         </div>
         <section class="panel">
-          <p class="meta">完整句命中后会直接返回这里配置的固定译文，不调用翻译 API。候选词仍只用于术语库，不参与高频直译。</p>
+          <div class="metrics">
+            ${renderMetric("启用中的直译", `${activeTranslationCount} 条`)}
+            ${renderMetric("累计直译命中", `${Number(totalDirectHits).toLocaleString("en-US")} 次`)}
+            ${renderMetric("待处理完整句", `${sentenceCandidates.length} 条`)}
+            ${renderMetric("候选出现总数", `${Number(candidateOccurrences).toLocaleString("en-US")} 次`)}
+          </div>
+          <p class="meta">流程：完整句候选 → 填写固定译文 → 转为直译 → 下次完整句、源语言、目标语言同时命中时，直接返回数据库译文，不调用翻译 API。</p>
+          <p class="meta">边界：这里处理完整句固定翻译；候选词只用于术语库，不参与高频直译。</p>
         </section>
         <section class="panel">
+          <h2 style="margin-top: 0;">手动新增直译</h2>
+          <p class="meta">适合已经确定会反复出现的固定话术。保存为 active 后立即参与完整句命中。</p>
           <form method="post" action="/admin/frequent-translations" class="grid">
             <input type="hidden" name="token" value="${escapeHtml(token)}">
             <label class="wide">原句
-              <textarea name="source_text" placeholder="完整原句" required></textarea>
+              <textarea name="source_text" placeholder="用户会发送的完整原句" required></textarea>
             </label>
             <label>源语言
               <select name="source_lang">${renderLanguageSelectOptions("zh")}</select>
@@ -696,10 +714,10 @@ function registerAdminGlossaryRoutes(app, options) {
               <select name="status">${renderFrequentTranslationStatusOptions("active")}</select>
             </label>
             <label class="wide">固定译文
-              <textarea name="translated_text" placeholder="命中后直接返回的译文" required></textarea>
+              <textarea name="translated_text" placeholder="机器人命中后直接回复的固定译文" required></textarea>
             </label>
             <label class="wide">备注
-              <input name="notes" placeholder="适用场景 / 审核说明">
+              <input name="notes" placeholder="适用场景 / 审核人 / 注意事项">
             </label>
             <div class="full actions">
               <button type="submit">新增直译</button>
@@ -707,8 +725,10 @@ function registerAdminGlossaryRoutes(app, options) {
           </form>
         </section>
         <h2>正式高频直译</h2>
+        <p class="meta">这些记录是当前会被检索的固定翻译。只有 active 状态会命中并跳过 API。</p>
         ${renderFrequentTranslationRows(frequentTranslations, token)}
         <h2>完整句候选</h2>
+        <p class="meta">这里是系统从聊天中记录到的完整句出现频率。选出值得固定翻译的句子，填写译文后转为直译。</p>
         ${renderSentenceCandidateRows(sentenceCandidates, token)}
       `;
 
