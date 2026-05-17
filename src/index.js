@@ -90,13 +90,6 @@ const translateClient = new Translate(buildTranslateClientOptions());
 
 const THREE_LANGS = ["zh", "th", "my"];
 
-const DEFAULT_TRANSLATION_PAIR_HELP_LINES = [
-  "支持任意两种语言组合，例如：",
-  "set zh th    默认中文 ↔ 泰文",
-  "set zh ja    默认中文 ↔ 日文",
-  "set th ja    默认泰文 ↔ 日文",
-];
-
 const LANG_NAME = {
   zh: "中文",
   "zh-TW": "繁體中文",
@@ -200,6 +193,235 @@ const ADMIN_LANGUAGE_OPTIONS = [
   "es",
 ];
 
+function getReplyLocaleFromLang(lang) {
+  const normalized = normalizeCode(lang);
+  if (normalized === "zh" || normalized === "zh-TW") return "zh";
+  if (normalized === "th") return "th";
+  if (normalized === "ja") return "ja";
+  return "en";
+}
+
+function getReplyLocale(user) {
+  if (!user) return "en";
+  return getReplyLocaleFromLang(user.from_lang || SYSTEM_DEFAULT_FROM_LANG);
+}
+
+function getLocalizedConversationLabel(event, locale) {
+  const sourceType = event.source?.type;
+  const labels = {
+    zh: { group: "群聊", room: "多人聊天室", user: "私聊", unknown: "未知来源" },
+    en: { group: "Group chat", room: "Multi-person chat", user: "Private chat", unknown: "Unknown source" },
+    th: { group: "กลุ่ม", room: "ห้องแชทหลายคน", user: "แชทส่วนตัว", unknown: "ไม่ทราบแหล่งที่มา" },
+    ja: { group: "グループチャット", room: "複数人チャット", user: "個別チャット", unknown: "不明な送信元" },
+  };
+  return (labels[locale] || labels.en)[sourceType] || (labels[locale] || labels.en).unknown;
+}
+
+function getLocalizedStatusValue(user, locale) {
+  if (isUserExpired(user)) {
+    return {
+      zh: "已过期",
+      en: "Expired",
+      th: "หมดอายุ",
+      ja: "期限切れ",
+    }[locale] || "Expired";
+  }
+
+  if (user?.status === "active") {
+    return {
+      zh: "active",
+      en: "active",
+      th: "ใช้งานได้",
+      ja: "有効",
+    }[locale] || "active";
+  }
+
+  if (user?.status === "paused") {
+    return {
+      zh: "paused",
+      en: "paused",
+      th: "ระงับ",
+      ja: "一時停止",
+    }[locale] || "paused";
+  }
+
+  return user?.status || "";
+}
+
+function getLocalizedModeName(mode, locale) {
+  if (mode === "trilingual") {
+    return {
+      zh: "三语模式",
+      en: "Trilingual mode",
+      th: "โหมด 3 ภาษา",
+      ja: "3言語モード",
+    }[locale] || "Trilingual mode";
+  }
+
+  return {
+    zh: "双语模式",
+    en: "Bilingual mode",
+    th: "โหมด 2 ภาษา",
+    ja: "2言語モード",
+  }[locale] || "Bilingual mode";
+}
+
+function getLocalizedConfigSource(source, locale) {
+  const labels = {
+    zh: { conversation: "当前群聊", user: "用户默认", system: "系统默认" },
+    en: { conversation: "Current chat", user: "User default", system: "System default" },
+    th: { conversation: "แชทปัจจุบัน", user: "ค่าเริ่มต้นของผู้ใช้", system: "ค่าเริ่มต้นของระบบ" },
+    ja: { conversation: "現在のチャット", user: "ユーザー初期設定", system: "システム初期設定" },
+  };
+  return (labels[locale] || labels.en)[source] || (labels[locale] || labels.en).system;
+}
+
+function getLocalizedYesNo(value, locale) {
+  if (value) {
+    return {
+      zh: "是",
+      en: "Yes",
+      th: "ใช่",
+      ja: "はい",
+    }[locale] || "Yes";
+  }
+
+  return {
+    zh: "否",
+    en: "No",
+    th: "ไม่ใช่",
+    ja: "いいえ",
+  }[locale] || "No";
+}
+
+function getLocalizedOnOff(value, locale) {
+  if (value) {
+    return {
+      zh: "开启",
+      en: "On",
+      th: "เปิด",
+      ja: "オン",
+    }[locale] || "On";
+  }
+
+  return {
+    zh: "关闭",
+    en: "Off",
+    th: "ปิด",
+    ja: "オフ",
+  }[locale] || "Off";
+}
+
+function getDirectTranslationHelpLines(locale) {
+  const lines = {
+    zh: [
+      "/TH 内容    指定翻译成泰文",
+      "/MM 内容    指定翻译成缅文",
+      "/ZH 内容    指定翻译成中文",
+      "/TW 内容    指定翻译成繁体中文",
+      "/EN 内容    指定翻译成英文",
+      "/JP 内容    指定翻译成日文",
+      "/DE 内容    指定翻译成德文",
+      "/FR 内容    指定翻译成法文",
+      "/ES 内容    指定翻译成西文",
+      "/RU 内容    指定翻译成俄文",
+      "/MS 内容    指定翻译成马来文",
+      "/KO 内容    指定翻译成韩文",
+      "/ID 内容    指定翻译成印尼文",
+      "/VI 内容    指定翻译成越南文",
+      "/HI 内容    指定翻译成印地文",
+      "/AR 内容    指定翻译成阿拉伯文",
+    ],
+    en: [
+      "/TH text    Translate to Thai",
+      "/MM text    Translate to Burmese",
+      "/ZH text    Translate to Chinese",
+      "/TW text    Translate to Traditional Chinese",
+      "/EN text    Translate to English",
+      "/JP text    Translate to Japanese",
+      "/DE text    Translate to German",
+      "/FR text    Translate to French",
+      "/ES text    Translate to Spanish",
+      "/RU text    Translate to Russian",
+      "/MS text    Translate to Malay",
+      "/KO text    Translate to Korean",
+      "/ID text    Translate to Indonesian",
+      "/VI text    Translate to Vietnamese",
+      "/HI text    Translate to Hindi",
+      "/AR text    Translate to Arabic",
+    ],
+    th: [
+      "/TH ข้อความ    แปลเป็นภาษาไทย",
+      "/MM ข้อความ    แปลเป็นภาษาพม่า",
+      "/ZH ข้อความ    แปลเป็นภาษาจีน",
+      "/TW ข้อความ    แปลเป็นจีนตัวเต็ม",
+      "/EN ข้อความ    แปลเป็นภาษาอังกฤษ",
+      "/JP ข้อความ    แปลเป็นภาษาญี่ปุ่น",
+      "/DE ข้อความ    แปลเป็นภาษาเยอรมัน",
+      "/FR ข้อความ    แปลเป็นภาษาฝรั่งเศส",
+      "/ES ข้อความ    แปลเป็นภาษาสเปน",
+      "/RU ข้อความ    แปลเป็นภาษารัสเซีย",
+      "/MS ข้อความ    แปลเป็นภาษามาเลย์",
+      "/KO ข้อความ    แปลเป็นภาษาเกาหลี",
+      "/ID ข้อความ    แปลเป็นภาษาอินโดนีเซีย",
+      "/VI ข้อความ    แปลเป็นภาษาเวียดนาม",
+      "/HI ข้อความ    แปลเป็นภาษาฮินดี",
+      "/AR ข้อความ    แปลเป็นภาษาอาหรับ",
+    ],
+    ja: [
+      "/TH テキスト    タイ語に翻訳",
+      "/MM テキスト    ミャンマー語に翻訳",
+      "/ZH テキスト    中国語に翻訳",
+      "/TW テキスト    繁体字中国語に翻訳",
+      "/EN テキスト    英語に翻訳",
+      "/JP テキスト    日本語に翻訳",
+      "/DE テキスト    ドイツ語に翻訳",
+      "/FR テキスト    フランス語に翻訳",
+      "/ES テキスト    スペイン語に翻訳",
+      "/RU テキスト    ロシア語に翻訳",
+      "/MS テキスト    マレー語に翻訳",
+      "/KO テキスト    韓国語に翻訳",
+      "/ID テキスト    インドネシア語に翻訳",
+      "/VI テキスト    ベトナム語に翻訳",
+      "/HI テキスト    ヒンディー語に翻訳",
+      "/AR テキスト    アラビア語に翻訳",
+    ],
+  };
+
+  return lines[locale] || lines.en;
+}
+
+function getTranslationPairHelpLines(locale) {
+  const lines = {
+    zh: [
+      "支持任意两种语言组合，例如：",
+      "set zh th    默认中文 ↔ 泰文",
+      "set zh ja    默认中文 ↔ 日文",
+      "set th ja    默认泰文 ↔ 日文",
+    ],
+    en: [
+      "Any two supported languages can be paired, for example:",
+      "set zh th    Default Chinese ↔ Thai",
+      "set zh ja    Default Chinese ↔ Japanese",
+      "set th ja    Default Thai ↔ Japanese",
+    ],
+    th: [
+      "สามารถจับคู่ภาษาใดก็ได้ 2 ภาษา เช่น:",
+      "set zh th    ค่าเริ่มต้นภาษาจีน ↔ ภาษาไทย",
+      "set zh ja    ค่าเริ่มต้นภาษาจีน ↔ ภาษาญี่ปุ่น",
+      "set th ja    ค่าเริ่มต้นภาษาไทย ↔ ภาษาญี่ปุ่น",
+    ],
+    ja: [
+      "対応言語から任意の2言語を組み合わせできます。例：",
+      "set zh th    初期言語 中国語 ↔ タイ語",
+      "set zh ja    初期言語 中国語 ↔ 日本語",
+      "set th ja    初期言語 タイ語 ↔ 日本語",
+    ],
+  };
+
+  return lines[locale] || lines.en;
+}
+
 const translationCache = new Map();
 const TRADITIONAL_CHINESE_HINT_RE =
   /[個們這裡嗎麼為與對時會說國語學體後發現讓買賣開關東廣門問間電車書長萬無風來過還點應當產業務員實認識聽見網頁電腦機構幫寫讀頭貓鳥魚馬龍雲台灣臺]/;
@@ -241,13 +463,6 @@ function getLangShortLabel(code) {
 
 function isSupportedDefaultLang(code) {
   return ADMIN_LANGUAGE_OPTIONS.includes(normalizeCode(code));
-}
-
-function getConversationLabel(event) {
-  if (event.source?.type === "group") return "群聊";
-  if (event.source?.type === "room") return "多人聊天室";
-  if (event.source?.type === "user") return "私聊";
-  return "未知来源";
 }
 
 function isUserIdCommand(lower) {
@@ -1999,27 +2214,28 @@ async function handleEvent(event) {
   const conversationTranslationEnabled = conversationBinding?.translationEnabled !== false;
   const user = actorUser || conversationBinding?.user || null;
   const translationConfig = getEffectiveTranslationConfig(user, conversationBinding);
+  const replyLocale = getReplyLocale(user);
 
   if (isHelpCommand(lower)) {
-    return reply(event, buildPublicHelpText());
+    return reply(event, buildPublicHelpText(replyLocale));
   }
 
   if (isUserIdCommand(lower)) {
-    return reply(event, buildUserIdText(lineUserId, user));
+    return reply(event, buildUserIdText(lineUserId, user, replyLocale));
   }
 
   if (isGroupIdCommand(lower)) {
-    return reply(event, buildGroupIdText(event, lineUserId));
+    return reply(event, buildGroupIdText(event, lineUserId, replyLocale));
   }
 
   if (isUsageCommand(lower)) {
-    return reply(event, buildUserUsageText(user));
+    return reply(event, buildUserUsageText(user, replyLocale));
   }
 
   if (!user) {
-    if (event.source?.type === "user") return reply(event, buildNeedPermissionText(lineUserId));
+    if (event.source?.type === "user") return reply(event, buildNeedPermissionText(lineUserId, replyLocale));
     if (isStatusCommand(lower) || isSetCommand(lower) || targetCommand) {
-      return reply(event, buildNeedPermissionText(lineUserId));
+      return reply(event, buildNeedPermissionText(lineUserId, replyLocale));
     }
     if (bindingKey) {
       console.log("Ignored group message without conversation binding:", {
@@ -2033,28 +2249,29 @@ async function handleEvent(event) {
   }
 
   if (isStatusCommand(lower)) {
-    return reply(event, buildStatusText(event, user, { conversationTranslationEnabled, translationConfig }));
+    return reply(event, buildStatusText(event, user, { conversationTranslationEnabled, translationConfig, locale: replyLocale }));
   }
 
   if (isSetCommand(lower)) {
-    if (!actorUser) return reply(event, buildNeedPermissionText(lineUserId));
+    const actorLocale = getReplyLocale(actorUser);
+    if (!actorUser) return reply(event, buildNeedPermissionText(lineUserId, actorLocale));
     if (!actorUserCheck.ok) {
-      return reply(event, buildUserRejectedText(lineUserId, actorUserCheck.reason, actorUser));
+      return reply(event, buildUserRejectedText(lineUserId, actorUserCheck.reason, actorUser, actorLocale));
     }
     if (bindingKey && (lower === "set on" || lower === "set off")) {
       const enabled = lower === "set on";
       const updated = await setConversationTranslationEnabled(bindingKey, enabled);
-      if (!updated) return reply(event, "切换群聊翻译开关失败，请稍后再试。");
+      if (!updated) return reply(event, buildSetToggleFailedText(actorLocale));
       await touchUser(actorUser.id);
-      return reply(event, enabled ? "群聊自动翻译已开启。" : "群聊自动翻译已关闭。\n之后只有 /TH、/ZH、/MM 等指定翻译命令会触发翻译。");
+      return reply(event, buildSetToggleSuccessText(enabled, actorLocale));
     }
-    return handleSetCommand(event, lower, actorUser, { bindingKey });
+    return handleSetCommand(event, lower, actorUser, { bindingKey, locale: actorLocale });
   }
 
   const userCheck = isUserUsable(user);
   if (!userCheck.ok) {
     if (event.source?.type === "user" || targetCommand) {
-      return reply(event, buildUserRejectedText(lineUserId, userCheck.reason, user));
+      return reply(event, buildUserRejectedText(lineUserId, userCheck.reason, user, replyLocale));
     }
     return null;
   }
@@ -2062,7 +2279,7 @@ async function handleEvent(event) {
   if (text.startsWith("!") || text.startsWith("//")) return null;
 
   if (targetCommand && !targetCommand.text) {
-    return reply(event, `请输入要翻译的内容，例如：/${targetCommand.targetLang.toUpperCase()} 你好`);
+    return reply(event, buildMissingTargetText(targetCommand.targetLang, replyLocale));
   }
 
   if (bindingKey && !conversationTranslationEnabled && !targetCommand) return null;
@@ -2075,7 +2292,7 @@ async function handleEvent(event) {
   const chargedChars = countChargeableChars(textToTranslate) * chargeMultiplier;
 
   if (getRemainingChars(user) < chargedChars) {
-    return reply(event, buildQuotaExceededText(lineUserId, user));
+    return reply(event, buildQuotaExceededText(lineUserId, user, replyLocale));
   }
 
   const sourceLang = normalizeCode(await detectLang(textToTranslate));
@@ -2107,157 +2324,509 @@ async function handleEvent(event) {
 
   if (messages.length === 0) {
     if (event.source?.type === "user" || targetCommand) {
-      return reply(event, "暂时无法完成翻译，请稍后再试或换一种表达。");
+      return reply(event, buildTranslateFailedText(replyLocale));
     }
     return null;
   }
 
   const charged = await chargeUserUsage(user.id, chargedChars);
   if (!charged) {
-    return reply(event, buildQuotaExceededText(lineUserId, user));
+    return reply(event, buildQuotaExceededText(lineUserId, user, replyLocale));
   }
 
   await touchUser(user.id);
   return replyMessages(event, addOriginalQuote(event, messages));
 }
 
-function buildNeedPermissionText(lineUserId) {
-  return [`请联系管理员添加权限。`, `USERID：${lineUserId}`].join("\n");
+function buildNeedPermissionText(lineUserId, locale = "en") {
+  const lines = {
+    zh: ["请联系管理员添加权限。", `USERID：${lineUserId}`],
+    en: ["Please contact the administrator to activate access.", `USERID: ${lineUserId}`],
+    th: ["กรุณาติดต่อผู้ดูแลเพื่อเปิดสิทธิ์การใช้งาน", `USERID: ${lineUserId}`],
+    ja: ["管理者に連絡して利用権限を有効にしてください。", `USERID: ${lineUserId}`],
+  };
+  return (lines[locale] || lines.en).join("\n");
 }
 
-function buildUserIdText(lineUserId, user) {
+function buildUserIdText(lineUserId, user, locale = "en") {
   if (!user) {
-    return [`当前账号尚未开通权限。`, `请联系管理员添加权限。`, `USERID：${lineUserId}`].join("\n");
+    const lines = {
+      zh: ["当前账号尚未开通权限。", "请联系管理员添加权限。", `USERID：${lineUserId}`],
+      en: ["This account is not activated yet.", "Please contact the administrator to activate access.", `USERID: ${lineUserId}`],
+      th: ["บัญชีนี้ยังไม่ได้เปิดสิทธิ์", "กรุณาติดต่อผู้ดูแลเพื่อเปิดสิทธิ์การใช้งาน", `USERID: ${lineUserId}`],
+      ja: ["このアカウントはまだ有効化されていません。", "管理者に連絡して利用権限を有効にしてください。", `USERID: ${lineUserId}`],
+    };
+    return (lines[locale] || lines.en).join("\n");
   }
 
-  return [`USERID：${lineUserId}`, `发送 /usage 查看额度。`].join("\n");
+  const lines = {
+    zh: [`USERID：${lineUserId}`, "发送 /usage 查看额度。"],
+    en: [`USERID: ${lineUserId}`, "Send /usage to check your quota."],
+    th: [`USERID: ${lineUserId}`, "ส่ง /usage เพื่อตรวจสอบโควตา"],
+    ja: [`USERID: ${lineUserId}`, "/usage を送信すると残量を確認できます。"],
+  };
+  return (lines[locale] || lines.en).join("\n");
 }
 
-function buildGroupIdText(event, lineUserId) {
+function buildGroupIdText(event, lineUserId, locale = "en") {
   if (event.source?.type === "group") {
-    return [`群聊ID：${event.source.groupId || ""}`, "可复制该 ID 到后台搜索群聊绑定。"].join("\n");
+    const lines = {
+      zh: [`群聊ID：${event.source.groupId || ""}`, "可复制该 ID 给管理员查询群聊绑定。"],
+      en: [`Group ID: ${event.source.groupId || ""}`, "Send this ID to the administrator to check the group binding."],
+      th: [`Group ID: ${event.source.groupId || ""}`, "ส่ง ID นี้ให้ผู้ดูแลเพื่อตรวจสอบการผูกกลุ่ม"],
+      ja: [`グループID：${event.source.groupId || ""}`, "このIDを管理者に送ると、グループ連携を確認できます。"],
+    };
+    return (lines[locale] || lines.en).join("\n");
   }
 
   if (event.source?.type === "room") {
-    return [`聊天室ID：${event.source.roomId || ""}`, "可复制该 ID 到后台搜索群聊绑定。"].join("\n");
+    const lines = {
+      zh: [`聊天室ID：${event.source.roomId || ""}`, "可复制该 ID 给管理员查询群聊绑定。"],
+      en: [`Chat room ID: ${event.source.roomId || ""}`, "Send this ID to the administrator to check the chat binding."],
+      th: [`Chat room ID: ${event.source.roomId || ""}`, "ส่ง ID นี้ให้ผู้ดูแลเพื่อตรวจสอบการผูกห้องแชท"],
+      ja: [`チャットルームID：${event.source.roomId || ""}`, "このIDを管理者に送ると、チャット連携を確認できます。"],
+    };
+    return (lines[locale] || lines.en).join("\n");
   }
 
-  return ["当前是私聊，没有群聊ID。", `USERID：${lineUserId}`].join("\n");
+  const lines = {
+    zh: ["当前是私聊，没有群聊ID。", `USERID：${lineUserId}`],
+    en: ["This is a private chat, so there is no group ID.", `USERID: ${lineUserId}`],
+    th: ["นี่คือแชทส่วนตัว จึงไม่มี Group ID", `USERID: ${lineUserId}`],
+    ja: ["これは個別チャットのため、グループIDはありません。", `USERID: ${lineUserId}`],
+  };
+  return (lines[locale] || lines.en).join("\n");
 }
 
-function buildUserUsageText(user) {
+function buildUserUsageText(user, locale = "en") {
   if (!user) {
-    return [`当前账号尚未开通权限。`, `请联系管理员添加权限。`, `发送 userid 查看 USERID。`].join("\n");
+    const lines = {
+      zh: ["当前账号尚未开通权限。", "请联系管理员添加权限。", "发送 userid 查看 USERID。"],
+      en: ["This account is not activated yet.", "Please contact the administrator to activate access.", "Send userid to check your USERID."],
+      th: ["บัญชีนี้ยังไม่ได้เปิดสิทธิ์", "กรุณาติดต่อผู้ดูแลเพื่อเปิดสิทธิ์การใช้งาน", "ส่ง userid เพื่อตรวจสอบ USERID"],
+      ja: ["このアカウントはまだ有効化されていません。", "管理者に連絡して利用権限を有効にしてください。", "userid を送信すると USERID を確認できます。"],
+    };
+    return (lines[locale] || lines.en).join("\n");
   }
 
-  const expired = isUserExpired(user);
   const remainingChars = getStoredRemainingChars(user);
   const quotaChars = getQuotaChars(user);
   const usedChars = getUsedChars(user);
 
-  return [
-    "当前额度",
-    `账号：${user.name}`,
-    `状态：${expired ? "已过期" : user.status}`,
-    `有效期至：${formatDate(user.expires_at)}`,
-    `总购买字符：${formatNumber(quotaChars)} 字符`,
-    `已用字符：${formatNumber(usedChars)} 字符`,
-    `剩余字符：${formatNumber(remainingChars)} 字符`,
-    user.mode === "trilingual"
-      ? "当前为三语模式，普通消息按输入字符 x 2 扣额度。"
-      : "当前为双语模式，普通消息按输入字符数扣额度。",
-  ].join("\n");
+  const builders = {
+    zh: () => [
+      "当前额度",
+      `账号：${user.name}`,
+      `状态：${getLocalizedStatusValue(user, locale)}`,
+      `有效期至：${formatDate(user.expires_at)}`,
+      `总购买字符：${formatNumber(quotaChars)} 字符`,
+      `已用字符：${formatNumber(usedChars)} 字符`,
+      `剩余字符：${formatNumber(remainingChars)} 字符`,
+      user.mode === "trilingual"
+        ? "当前为三语模式，普通消息按输入字符 x 2 扣额度。"
+        : "当前为双语模式，普通消息按输入字符数扣额度。",
+    ],
+    en: () => [
+      "Current quota",
+      `Account: ${user.name}`,
+      `Status: ${getLocalizedStatusValue(user, locale)}`,
+      `Valid until: ${formatDate(user.expires_at)}`,
+      `Total purchased: ${formatNumber(quotaChars)} chars`,
+      `Used: ${formatNumber(usedChars)} chars`,
+      `Remaining: ${formatNumber(remainingChars)} chars`,
+      user.mode === "trilingual"
+        ? "Current mode: trilingual. Normal messages use input chars x 2."
+        : "Current mode: bilingual. Normal messages use input chars.",
+    ],
+    th: () => [
+      "โควตาปัจจุบัน",
+      `บัญชี: ${user.name}`,
+      `สถานะ: ${getLocalizedStatusValue(user, locale)}`,
+      `ใช้ได้ถึง: ${formatDate(user.expires_at)}`,
+      `จำนวนที่ซื้อทั้งหมด: ${formatNumber(quotaChars)} ตัวอักษร`,
+      `ใช้ไปแล้ว: ${formatNumber(usedChars)} ตัวอักษร`,
+      `คงเหลือ: ${formatNumber(remainingChars)} ตัวอักษร`,
+      user.mode === "trilingual"
+        ? "ขณะนี้เป็นโหมด 3 ภาษา ข้อความทั่วไปคิดโควตาเป็นจำนวนตัวอักษร x 2"
+        : "ขณะนี้เป็นโหมด 2 ภาษา ข้อความทั่วไปคิดโควตาตามจำนวนตัวอักษร",
+    ],
+    ja: () => [
+      "現在の残量",
+      `アカウント：${user.name}`,
+      `状態：${getLocalizedStatusValue(user, locale)}`,
+      `有効期限：${formatDate(user.expires_at)}`,
+      `購入文字数：${formatNumber(quotaChars)} 文字`,
+      `使用済み：${formatNumber(usedChars)} 文字`,
+      `残り：${formatNumber(remainingChars)} 文字`,
+      user.mode === "trilingual"
+        ? "現在は3言語モードです。通常メッセージは入力文字数 x 2 で消費されます。"
+        : "現在は2言語モードです。通常メッセージは入力文字数で消費されます。",
+    ],
+  };
+
+  return (builders[locale] || builders.en)().join("\n");
 }
 
 function buildStatusText(event, user, options = {}) {
+  const locale = options.locale || "en";
   const userCheck = isUserUsable(user);
   const config = options.translationConfig || getEffectiveTranslationConfig(user, null);
-  const lines = ["当前翻译状态", ""];
 
-  lines.push(`来源：${getConversationLabel(event)}`);
-  lines.push(`USERID：${event.source?.userId || ""}`);
-  lines.push(`用户名：${user.name}`);
-  lines.push(`有效：${userCheck.ok ? "是" : "否"}`);
-  lines.push(`状态：${isUserExpired(user) ? "已过期" : user.status}`);
-  lines.push(`有效期至：${formatDate(user.expires_at)}`);
-  lines.push(`配置来源：${config.source === "conversation" ? "当前群聊" : config.source === "user" ? "用户默认" : "系统默认"}`);
-  lines.push(`模式：${config.mode === "trilingual" ? "三语模式" : "双语模式"}`);
+  const text = {
+    zh: {
+      title: "当前翻译状态",
+      source: "来源",
+      username: "用户名",
+      valid: "有效",
+      status: "状态",
+      expires: "有效期至",
+      configSource: "配置来源",
+      mode: "模式",
+      languages: "语言",
+      defaultLang: "默认语言",
+      pairedLang: "互译语言",
+      otherLangs: "其他语言：翻译成默认语言",
+      conversationTranslation: "群聊自动翻译",
+      usageHint: "发送 /usage 查看额度。",
+    },
+    en: {
+      title: "Current translation status",
+      source: "Source",
+      username: "Name",
+      valid: "Valid",
+      status: "Status",
+      expires: "Valid until",
+      configSource: "Config source",
+      mode: "Mode",
+      languages: "Languages",
+      defaultLang: "Default language",
+      pairedLang: "Paired language",
+      otherLangs: "Other languages: translated to the default language",
+      conversationTranslation: "Group auto-translation",
+      usageHint: "Send /usage to check your quota.",
+    },
+    th: {
+      title: "สถานะการแปลปัจจุบัน",
+      source: "แหล่งที่มา",
+      username: "ชื่อบัญชี",
+      valid: "ใช้งานได้",
+      status: "สถานะ",
+      expires: "ใช้ได้ถึง",
+      configSource: "แหล่งที่มาของการตั้งค่า",
+      mode: "โหมด",
+      languages: "ภาษา",
+      defaultLang: "ภาษาเริ่มต้น",
+      pairedLang: "ภาษาคู่แปล",
+      otherLangs: "ภาษาอื่นจะแปลเป็นภาษาเริ่มต้น",
+      conversationTranslation: "แปลอัตโนมัติในกลุ่ม",
+      usageHint: "ส่ง /usage เพื่อตรวจสอบโควตา",
+    },
+    ja: {
+      title: "現在の翻訳状態",
+      source: "送信元",
+      username: "ユーザー名",
+      valid: "利用可能",
+      status: "状態",
+      expires: "有効期限",
+      configSource: "設定元",
+      mode: "モード",
+      languages: "言語",
+      defaultLang: "初期言語",
+      pairedLang: "相互翻訳言語",
+      otherLangs: "その他の言語：初期言語に翻訳",
+      conversationTranslation: "グループ自動翻訳",
+      usageHint: "/usage を送信すると残量を確認できます。",
+    },
+  }[locale] || {};
+
+  const lines = [text.title, ""];
+
+  lines.push(`${text.source}: ${getLocalizedConversationLabel(event, locale)}`);
+  lines.push(`USERID: ${event.source?.userId || ""}`);
+  lines.push(`${text.username}: ${user.name}`);
+  lines.push(`${text.valid}: ${getLocalizedYesNo(userCheck.ok, locale)}`);
+  lines.push(`${text.status}: ${getLocalizedStatusValue(user, locale)}`);
+  lines.push(`${text.expires}: ${formatDate(user.expires_at)}`);
+  lines.push(`${text.configSource}: ${getLocalizedConfigSource(config.source, locale)}`);
+  lines.push(`${text.mode}: ${getLocalizedModeName(config.mode, locale)}`);
   if (config.mode === "trilingual") {
-    lines.push("语言：中文 / ภาษาไทย / မြန်မာဘာသာ");
+    lines.push(`${text.languages}: 中文 / ภาษาไทย / မြန်မာဘာသာ`);
   } else {
-    lines.push(`默认语言：${getLangName(config.from_lang)}`);
-    lines.push(`互译语言：${getLangName(config.to_lang)}`);
-    lines.push("其他语言：翻译成默认语言");
+    lines.push(`${text.defaultLang}: ${getLangName(config.from_lang)}`);
+    lines.push(`${text.pairedLang}: ${getLangName(config.to_lang)}`);
+    lines.push(text.otherLangs);
   }
   if (getConversationBindingKey(event)) {
-    lines.push(`群聊自动翻译：${options.conversationTranslationEnabled === false ? "关闭" : "开启"}`);
+    lines.push(`${text.conversationTranslation}: ${getLocalizedOnOff(options.conversationTranslationEnabled !== false, locale)}`);
   }
   lines.push("");
-  lines.push("发送 /usage 查看额度。");
+  lines.push(text.usageHint);
 
   return lines.join("\n");
 }
 
-function buildUserRejectedText(lineUserId, reason, user) {
+function buildUserRejectedText(lineUserId, reason, user, locale = "en") {
   if (reason === "status") {
-    return [`账号已暂停，请联系管理员。`, `USERID：${lineUserId}`].join("\n");
+    const lines = {
+      zh: ["账号已暂停，请联系管理员。", `USERID：${lineUserId}`],
+      en: ["This account is paused. Please contact the administrator.", `USERID: ${lineUserId}`],
+      th: ["บัญชีนี้ถูกระงับ กรุณาติดต่อผู้ดูแล", `USERID: ${lineUserId}`],
+      ja: ["このアカウントは一時停止中です。管理者に連絡してください。", `USERID: ${lineUserId}`],
+    };
+    return (lines[locale] || lines.en).join("\n");
   }
   if (reason === "expired") {
-    return [`账号有效期已过，请联系管理员充值流量。`, `USERID：${lineUserId}`, `有效期至：${formatDate(user?.expires_at)}`].join("\n");
+    const lines = {
+      zh: ["账号有效期已过，请联系管理员充值流量。", `USERID：${lineUserId}`, `有效期至：${formatDate(user?.expires_at)}`],
+      en: ["This account has expired. Please contact the administrator to recharge.", `USERID: ${lineUserId}`, `Valid until: ${formatDate(user?.expires_at)}`],
+      th: ["บัญชีนี้หมดอายุแล้ว กรุณาติดต่อผู้ดูแลเพื่อเติมโควตา", `USERID: ${lineUserId}`, `ใช้ได้ถึง: ${formatDate(user?.expires_at)}`],
+      ja: ["このアカウントは期限切れです。管理者に連絡してチャージしてください。", `USERID: ${lineUserId}`, `有効期限：${formatDate(user?.expires_at)}`],
+    };
+    return (lines[locale] || lines.en).join("\n");
   }
   if (reason === "quota") {
-    return buildQuotaExceededText(lineUserId, user);
+    return buildQuotaExceededText(lineUserId, user, locale);
   }
-  return buildNeedPermissionText(lineUserId);
+  return buildNeedPermissionText(lineUserId, locale);
 }
 
-function buildQuotaExceededText(lineUserId, user) {
-  return [
-    "当前字符余额不足，请联系管理员充值流量。",
-    `USERID：${lineUserId}`,
-    `剩余字符：${formatNumber(getStoredRemainingChars(user))} 字符`,
-  ].join("\n");
+function buildQuotaExceededText(lineUserId, user, locale = "en") {
+  const remaining = formatNumber(getStoredRemainingChars(user));
+  const lines = {
+    zh: ["当前字符余额不足，请联系管理员充值流量。", `USERID：${lineUserId}`, `剩余字符：${remaining} 字符`],
+    en: ["Not enough character quota. Please contact the administrator to recharge.", `USERID: ${lineUserId}`, `Remaining: ${remaining} chars`],
+    th: ["โควตาตัวอักษรไม่เพียงพอ กรุณาติดต่อผู้ดูแลเพื่อเติมโควตา", `USERID: ${lineUserId}`, `คงเหลือ: ${remaining} ตัวอักษร`],
+    ja: ["文字数残量が不足しています。管理者に連絡してチャージしてください。", `USERID: ${lineUserId}`, `残り：${remaining} 文字`],
+  };
+  return (lines[locale] || lines.en).join("\n");
 }
 
-const DIRECT_TRANSLATION_HELP_LINES = [
-  "/TH 内容    指定翻译成泰文",
-  "/MM 内容    指定翻译成缅文",
-  "/ZH 内容    指定翻译成中文",
-  "/TW 内容    指定翻译成繁体中文",
-  "/EN 内容    指定翻译成英文",
-  "/JP 内容    指定翻译成日文",
-  "/DE 内容    指定翻译成德文",
-  "/FR 内容    指定翻译成法文",
-  "/ES 内容    指定翻译成西文",
-  "/RU 内容    指定翻译成俄文",
-  "/MS 内容    指定翻译成马来文",
-  "/KO 内容    指定翻译成韩文",
-  "/ID 内容    指定翻译成印尼文",
-  "/VI 内容    指定翻译成越南文",
-  "/HI 内容    指定翻译成印地文",
-  "/AR 内容    指定翻译成阿拉伯文",
-];
+function buildPublicHelpText(locale = "en") {
+  const builders = {
+    zh: () => [
+      "常用命令",
+      "userid       查看 USERID",
+      "/groupid    查看当前群聊ID",
+      "/usage      查看额度",
+      "/status     查看当前状态",
+      "set on      开启群聊自动翻译",
+      "set off     关闭群聊自动翻译，只保留指定翻译",
+      "set 3lang   开启中文 / 泰文 / 缅文三语模式",
+      "",
+      "指定翻译方法",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "设置默认翻译语言",
+      "私聊中设置用户默认；群聊中设置当前群聊。",
+      "支持任意两种语言组合。",
+      "其他语言会翻译成第一种默认语言。",
+      ...getTranslationPairHelpLines(locale),
+    ],
+    en: () => [
+      "Common commands",
+      "userid       Show USERID",
+      "/groupid    Show current group ID",
+      "/usage      Check quota",
+      "/status     Show current status",
+      "set on      Turn on group auto-translation",
+      "set off     Turn off group auto-translation; directed translation still works",
+      "set 3lang   Turn on Chinese / Thai / Burmese trilingual mode",
+      "",
+      "Directed translation",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "Set default translation languages",
+      "In private chat: sets your default. In group chat: sets this chat only.",
+      "Any two supported languages can be paired.",
+      "Other languages will be translated to the first default language.",
+      ...getTranslationPairHelpLines(locale),
+    ],
+    th: () => [
+      "คำสั่งที่ใช้บ่อย",
+      "userid       ดู USERID",
+      "/groupid    ดู ID ของกลุ่มปัจจุบัน",
+      "/usage      ตรวจสอบโควตา",
+      "/status     ดูสถานะปัจจุบัน",
+      "set on      เปิดการแปลอัตโนมัติในกลุ่ม",
+      "set off     ปิดการแปลอัตโนมัติในกลุ่ม แต่ยังใช้คำสั่งแปลแบบระบุภาษาได้",
+      "set 3lang   เปิดโหมด 3 ภาษา จีน / ไทย / พม่า",
+      "",
+      "แปลแบบระบุภาษา",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "ตั้งค่าภาษาแปลเริ่มต้น",
+      "ในแชทส่วนตัว: ตั้งค่าเริ่มต้นของคุณ ในกลุ่ม: ตั้งค่าเฉพาะกลุ่มนี้",
+      "สามารถจับคู่ภาษาใดก็ได้ 2 ภาษา",
+      "ภาษาอื่นจะแปลเป็นภาษาเริ่มต้นภาษาแรก",
+      ...getTranslationPairHelpLines(locale),
+    ],
+    ja: () => [
+      "よく使うコマンド",
+      "userid       USERIDを表示",
+      "/groupid    現在のグループIDを表示",
+      "/usage      残量を確認",
+      "/status     現在の状態を表示",
+      "set on      グループ自動翻訳をオン",
+      "set off     グループ自動翻訳をオフ。指定翻訳は利用できます",
+      "set 3lang   中国語 / タイ語 / ミャンマー語の3言語モードをオン",
+      "",
+      "指定翻訳",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "初期翻訳言語の設定",
+      "個別チャットではユーザー初期設定、グループでは現在のチャットだけを設定します。",
+      "対応言語から任意の2言語を組み合わせできます。",
+      "その他の言語は1つ目の初期言語に翻訳されます。",
+      ...getTranslationPairHelpLines(locale),
+    ],
+  };
 
-function buildPublicHelpText() {
-  return [
-    "常用命令",
-    "userid       查看 USERID",
-    "/groupid    查看当前群聊ID",
-    "/usage      查看额度",
-    "/status     查看当前状态",
-    "set on      开启群聊自动翻译",
-    "set off     关闭群聊自动翻译，只保留指定翻译",
-    "set 3lang   开启中文 / 泰文 / 缅文三语模式",
-    "",
-    "指定翻译方法",
-    ...DIRECT_TRANSLATION_HELP_LINES,
-    "",
-    "设置默认翻译语言",
-    "私聊中设置用户默认；群聊中设置当前群聊。",
-    "支持任意两种语言组合。",
-    "其他语言会翻译成第一种默认语言。",
-    ...DEFAULT_TRANSLATION_PAIR_HELP_LINES,
-  ].join("\n");
+  return (builders[locale] || builders.en)().join("\n");
+}
+
+function buildSetToggleFailedText(locale = "en") {
+  return {
+    zh: "切换群聊翻译开关失败，请稍后再试。",
+    en: "Failed to change the group translation switch. Please try again later.",
+    th: "เปลี่ยนสถานะการแปลในกลุ่มไม่สำเร็จ กรุณาลองใหม่ภายหลัง",
+    ja: "グループ翻訳スイッチの変更に失敗しました。しばらくしてから再試行してください。",
+  }[locale] || "Failed to change the group translation switch. Please try again later.";
+}
+
+function buildSetToggleSuccessText(enabled, locale = "en") {
+  if (enabled) {
+    return {
+      zh: "群聊自动翻译已开启。",
+      en: "Group auto-translation is on.",
+      th: "เปิดการแปลอัตโนมัติในกลุ่มแล้ว",
+      ja: "グループ自動翻訳をオンにしました。",
+    }[locale] || "Group auto-translation is on.";
+  }
+
+  return {
+    zh: "群聊自动翻译已关闭。\n之后只有 /TH、/ZH、/MM 等指定翻译命令会触发翻译。",
+    en: "Group auto-translation is off.\nOnly directed commands such as /TH, /ZH, and /MM will trigger translation.",
+    th: "ปิดการแปลอัตโนมัติในกลุ่มแล้ว\nต่อจากนี้เฉพาะคำสั่งระบุภาษา เช่น /TH, /ZH, /MM เท่านั้นที่จะเรียกการแปล",
+    ja: "グループ自動翻訳をオフにしました。\n今後は /TH、/ZH、/MM などの指定翻訳コマンドだけが翻訳を実行します。",
+  }[locale] || "Group auto-translation is off.\nOnly directed commands such as /TH, /ZH, and /MM will trigger translation.";
+}
+
+function buildSetTrilingualFailedText(isConversationConfig, locale = "en") {
+  const lines = {
+    zh: isConversationConfig ? "切换当前群聊三语模式失败，请稍后再试。" : "切换三语模式失败，请稍后再试。",
+    en: isConversationConfig ? "Failed to switch this chat to trilingual mode. Please try again later." : "Failed to switch to trilingual mode. Please try again later.",
+    th: isConversationConfig ? "เปลี่ยนแชทนี้เป็นโหมด 3 ภาษาไม่สำเร็จ กรุณาลองใหม่ภายหลัง" : "เปลี่ยนเป็นโหมด 3 ภาษาไม่สำเร็จ กรุณาลองใหม่ภายหลัง",
+    ja: isConversationConfig ? "このチャットを3言語モードに切り替えられませんでした。しばらくしてから再試行してください。" : "3言語モードに切り替えられませんでした。しばらくしてから再試行してください。",
+  };
+  return lines[locale] || lines.en;
+}
+
+function buildSetTrilingualSuccessText(isConversationConfig, locale = "en") {
+  const builders = {
+    zh: () => [
+      isConversationConfig ? "当前群聊三语模式已开启。" : "三语模式已开启。",
+      "中文 / ภาษาไทย / မြန်မာဘာသာ 三语互译。",
+      "每条消息按 输入字符数 x 2 扣额度。",
+      "",
+      "切回双语：set zh th",
+    ],
+    en: () => [
+      isConversationConfig ? "This chat is now in trilingual mode." : "Trilingual mode is on.",
+      "Chinese / Thai / Burmese will be translated between each other.",
+      "Each normal message uses input chars x 2.",
+      "",
+      "Switch back to bilingual: set zh th",
+    ],
+    th: () => [
+      isConversationConfig ? "เปิดโหมด 3 ภาษาในแชทนี้แล้ว" : "เปิดโหมด 3 ภาษาแล้ว",
+      "จีน / ไทย / พม่า จะแปลถึงกัน",
+      "แต่ละข้อความทั่วไปคิดโควตาเป็นจำนวนตัวอักษร x 2",
+      "",
+      "กลับไปโหมด 2 ภาษา: set zh th",
+    ],
+    ja: () => [
+      isConversationConfig ? "このチャットの3言語モードをオンにしました。" : "3言語モードをオンにしました。",
+      "中国語 / タイ語 / ミャンマー語を相互翻訳します。",
+      "通常メッセージは入力文字数 x 2 で消費されます。",
+      "",
+      "2言語モードに戻す：set zh th",
+    ],
+  };
+
+  return (builders[locale] || builders.en)().join("\n");
+}
+
+function buildSetLanguageFailedText(isConversationConfig, locale = "en") {
+  const lines = {
+    zh: isConversationConfig ? "切换当前群聊语言失败，请稍后再试。" : "切换语言失败，请稍后再试。",
+    en: isConversationConfig ? "Failed to change this chat's languages. Please try again later." : "Failed to change languages. Please try again later.",
+    th: isConversationConfig ? "เปลี่ยนภาษาของแชทนี้ไม่สำเร็จ กรุณาลองใหม่ภายหลัง" : "เปลี่ยนภาษาไม่สำเร็จ กรุณาลองใหม่ภายหลัง",
+    ja: isConversationConfig ? "このチャットの言語を切り替えられませんでした。しばらくしてから再試行してください。" : "言語を切り替えられませんでした。しばらくしてから再試行してください。",
+  };
+  return lines[locale] || lines.en;
+}
+
+function buildSetLanguageSuccessText(isConversationConfig, fromLang, toLang, locale = "en") {
+  const builders = {
+    zh: () => [
+      `${isConversationConfig ? "当前群聊已切换" : "已切换"}：${getLangName(fromLang)} ↔ ${getLangName(toLang)}`,
+      `默认语言：${getLangName(fromLang)}`,
+      `其他语言会翻译成：${getLangName(fromLang)}`,
+      "",
+      "发送 set 3lang 可切换到三语模式。",
+    ],
+    en: () => [
+      `${isConversationConfig ? "This chat has been switched" : "Switched"}: ${getLangName(fromLang)} ↔ ${getLangName(toLang)}`,
+      `Default language: ${getLangName(fromLang)}`,
+      `Other languages will be translated to: ${getLangName(fromLang)}`,
+      "",
+      "Send set 3lang to switch to trilingual mode.",
+    ],
+    th: () => [
+      `${isConversationConfig ? "เปลี่ยนภาษาของแชทนี้แล้ว" : "เปลี่ยนภาษาแล้ว"}: ${getLangName(fromLang)} ↔ ${getLangName(toLang)}`,
+      `ภาษาเริ่มต้น: ${getLangName(fromLang)}`,
+      `ภาษาอื่นจะแปลเป็น: ${getLangName(fromLang)}`,
+      "",
+      "ส่ง set 3lang เพื่อเปลี่ยนเป็นโหมด 3 ภาษา",
+    ],
+    ja: () => [
+      `${isConversationConfig ? "このチャットを切り替えました" : "切り替えました"}：${getLangName(fromLang)} ↔ ${getLangName(toLang)}`,
+      `初期言語：${getLangName(fromLang)}`,
+      `その他の言語は次に翻訳されます：${getLangName(fromLang)}`,
+      "",
+      "set 3lang を送信すると3言語モードに切り替えられます。",
+    ],
+  };
+
+  return (builders[locale] || builders.en)().join("\n");
+}
+
+function buildSameLanguageText(locale = "en") {
+  return {
+    zh: "默认语言和互译语言不能相同。",
+    en: "The default language and paired language cannot be the same.",
+    th: "ภาษาเริ่มต้นและภาษาคู่แปลต้องไม่เหมือนกัน",
+    ja: "初期言語と相互翻訳言語を同じにすることはできません。",
+  }[locale] || "The default language and paired language cannot be the same.";
+}
+
+function buildMissingTargetText(targetLang, locale = "en") {
+  const command = `/${targetLang.toUpperCase()}`;
+  return {
+    zh: `请输入要翻译的内容，例如：${command} 你好`,
+    en: `Please enter text to translate, for example: ${command} hello`,
+    th: `กรุณาใส่ข้อความที่ต้องการแปล เช่น ${command} สวัสดี`,
+    ja: `翻訳するテキストを入力してください。例：${command} こんにちは`,
+  }[locale] || `Please enter text to translate, for example: ${command} hello`;
+}
+
+function buildTranslateFailedText(locale = "en") {
+  return {
+    zh: "暂时无法完成翻译，请稍后再试或换一种表达。",
+    en: "Translation is temporarily unavailable. Please try again later or rephrase.",
+    th: "ขณะนี้ยังแปลไม่ได้ กรุณาลองใหม่ภายหลังหรือเปลี่ยนวิธีเขียน",
+    ja: "一時的に翻訳できません。しばらくしてから再試行するか、別の表現にしてください。",
+  }[locale] || "Translation is temporarily unavailable. Please try again later or rephrase.";
 }
 
 async function handleSetCommand(event, lower, user, options = {}) {
@@ -2265,6 +2834,7 @@ async function handleSetCommand(event, lower, user, options = {}) {
   const sub = parts[1];
   const bindingKey = options.bindingKey || null;
   const isConversationConfig = Boolean(bindingKey);
+  const locale = options.locale || getReplyLocale(user);
 
   async function saveConfig(payload) {
     if (isConversationConfig) {
@@ -2296,20 +2866,11 @@ async function handleSetCommand(event, lower, user, options = {}) {
     });
 
     if (!saved) {
-      return reply(event, isConversationConfig ? "切换当前群聊三语模式失败，请稍后再试。" : "切换三语模式失败，请稍后再试。");
+      return reply(event, buildSetTrilingualFailedText(isConversationConfig, locale));
     }
 
     await touchUser(user.id);
-    return reply(
-      event,
-      [
-        isConversationConfig ? "当前群聊三语模式已开启。" : "三语模式已开启。",
-        "中文 / ภาษาไทย / မြန်မာဘာသာ 三语互译。",
-        "每条消息按 输入字符数 x 2 扣额度。",
-        "",
-        "切回双语：set zh th",
-      ].join("\n")
-    );
+    return reply(event, buildSetTrilingualSuccessText(isConversationConfig, getReplyLocaleFromLang("zh")));
   }
 
   if (parts.length === 3) {
@@ -2317,11 +2878,11 @@ async function handleSetCommand(event, lower, user, options = {}) {
     const b = normalizeCode(parts[2]);
 
     if (!isSupportedDefaultLang(a) || !isSupportedDefaultLang(b)) {
-      return reply(event, buildSetHelpText("不支持该语言，可用命令示例："));
+      return reply(event, buildSetHelpText(getUnsupportedLanguageTitle(locale), locale));
     }
 
     if (a === b) {
-      return reply(event, "默认语言和互译语言不能相同。");
+      return reply(event, buildSameLanguageText(locale));
     }
 
     const saved = await saveConfig({
@@ -2331,46 +2892,116 @@ async function handleSetCommand(event, lower, user, options = {}) {
     });
 
     if (!saved) {
-      return reply(event, isConversationConfig ? "切换当前群聊语言失败，请稍后再试。" : "切换语言失败，请稍后再试。");
+      return reply(event, buildSetLanguageFailedText(isConversationConfig, locale));
     }
 
     await touchUser(user.id);
-    return reply(
-      event,
-      [
-        `${isConversationConfig ? "当前群聊已切换" : "已切换"}：${getLangName(a)} ↔ ${getLangName(b)}`,
-        `默认语言：${getLangName(a)}`,
-        `其他语言会翻译成：${getLangName(a)}`,
-        "",
-        "发送 set 3lang 可切换到三语模式。",
-      ].join("\n")
-    );
+    return reply(event, buildSetLanguageSuccessText(isConversationConfig, a, b, getReplyLocaleFromLang(a)));
   }
 
   await touchUser(user.id);
-  return reply(event, buildSetHelpText("set 命令用法："));
+  return reply(event, buildSetHelpText(getSetUsageTitle(locale), locale));
 }
 
-function buildSetHelpText(title) {
-  return [
-    title,
-    "",
-    ...DIRECT_TRANSLATION_HELP_LINES,
-    "",
-    "可设置的默认翻译语言：",
-    "私聊中设置用户默认；群聊中设置当前群聊。",
-    "支持任意两种语言组合。",
-    "其他语言会翻译成第一种默认语言。",
-    ...DEFAULT_TRANSLATION_PAIR_HELP_LINES,
-    "",
-    "set on       开启群聊自动翻译",
-    "set off      关闭群聊自动翻译，只保留 /TH 等指定翻译",
-    "",
-    "/status      查看当前状态",
-    "/usage       查看额度",
-    "/groupid     查看当前群聊ID",
-    "userid       查看 USERID",
-  ].join("\n");
+function getUnsupportedLanguageTitle(locale) {
+  return {
+    zh: "不支持该语言，可用命令示例：",
+    en: "Unsupported language. Examples:",
+    th: "ไม่รองรับภาษานี้ ตัวอย่างคำสั่ง:",
+    ja: "この言語には対応していません。コマンド例：",
+  }[locale] || "Unsupported language. Examples:";
+}
+
+function getSetUsageTitle(locale) {
+  return {
+    zh: "set 命令用法：",
+    en: "How to use set:",
+    th: "วิธีใช้คำสั่ง set:",
+    ja: "set コマンドの使い方：",
+  }[locale] || "How to use set:";
+}
+
+function buildSetHelpText(title, locale = "en") {
+  const builders = {
+    zh: () => [
+      title,
+      "",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "可设置的默认翻译语言：",
+      "私聊中设置用户默认；群聊中设置当前群聊。",
+      "支持任意两种语言组合。",
+      "其他语言会翻译成第一种默认语言。",
+      ...getTranslationPairHelpLines(locale),
+      "",
+      "set on       开启群聊自动翻译",
+      "set off      关闭群聊自动翻译，只保留 /TH 等指定翻译",
+      "",
+      "/status      查看当前状态",
+      "/usage       查看额度",
+      "/groupid     查看当前群聊ID",
+      "userid       查看 USERID",
+    ],
+    en: () => [
+      title,
+      "",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "Default translation languages:",
+      "In private chat: sets your default. In group chat: sets this chat only.",
+      "Any two supported languages can be paired.",
+      "Other languages will be translated to the first default language.",
+      ...getTranslationPairHelpLines(locale),
+      "",
+      "set on       Turn on group auto-translation",
+      "set off      Turn off group auto-translation; /TH and other directed commands still work",
+      "",
+      "/status      Show current status",
+      "/usage       Check quota",
+      "/groupid     Show current group ID",
+      "userid       Show USERID",
+    ],
+    th: () => [
+      title,
+      "",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "ภาษาที่ตั้งเป็นค่าเริ่มต้นได้:",
+      "ในแชทส่วนตัว: ตั้งค่าเริ่มต้นของคุณ ในกลุ่ม: ตั้งค่าเฉพาะกลุ่มนี้",
+      "สามารถจับคู่ภาษาใดก็ได้ 2 ภาษา",
+      "ภาษาอื่นจะแปลเป็นภาษาเริ่มต้นภาษาแรก",
+      ...getTranslationPairHelpLines(locale),
+      "",
+      "set on       เปิดการแปลอัตโนมัติในกลุ่ม",
+      "set off      ปิดการแปลอัตโนมัติในกลุ่ม แต่ /TH และคำสั่งระบุภาษาอื่นยังใช้ได้",
+      "",
+      "/status      ดูสถานะปัจจุบัน",
+      "/usage       ตรวจสอบโควตา",
+      "/groupid     ดู ID ของกลุ่มปัจจุบัน",
+      "userid       ดู USERID",
+    ],
+    ja: () => [
+      title,
+      "",
+      ...getDirectTranslationHelpLines(locale),
+      "",
+      "設定できる初期翻訳言語：",
+      "個別チャットではユーザー初期設定、グループでは現在のチャットだけを設定します。",
+      "対応言語から任意の2言語を組み合わせできます。",
+      "その他の言語は1つ目の初期言語に翻訳されます。",
+      ...getTranslationPairHelpLines(locale),
+      "",
+      "set on       グループ自動翻訳をオン",
+      "set off      グループ自動翻訳をオフ。/TH などの指定翻訳は利用できます",
+      "",
+      "/status      現在の状態を表示",
+      "/usage       残量を確認",
+      "/groupid     現在のグループIDを表示",
+      "userid       USERIDを表示",
+    ],
+  };
+
+  return (builders[locale] || builders.en)().join("\n");
 }
 
 async function buildBilingualMessages(text, sourceLang, activation) {
@@ -2404,6 +3035,7 @@ async function buildTrilingualMessages(text, sourceLang) {
   );
 
   const lines = [];
+  const separator = "\n\n";
   let remainingLength = MAX_LINE_TEXT_LENGTH;
 
   for (const { targetLang, translated } of results) {
@@ -2412,16 +3044,16 @@ async function buildTrilingualMessages(text, sourceLang) {
     const line = buildTranslationLine(
       targetLang,
       translated,
-      remainingLength - (lines.length > 0 ? 1 : 0)
+      remainingLength - (lines.length > 0 ? separator.length : 0)
     );
     if (!line) break;
 
     lines.push(line);
-    remainingLength -= line.length + (lines.length > 1 ? 1 : 0);
+    remainingLength -= line.length + (lines.length > 1 ? separator.length : 0);
   }
 
   if (lines.length === 0) return [];
-  return [{ type: "text", text: lines.join("\n") }];
+  return [{ type: "text", text: lines.join(separator) }];
 }
 
 function buildTranslationPrefix(targetLang) {
