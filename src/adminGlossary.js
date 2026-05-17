@@ -62,8 +62,9 @@ function renderAdminShell({ title, token, message, adminEmail, content }) {
     h2 { font-size: 18px; margin: 22px 0 12px; }
     h3 { margin: 16px 0 10px; font-size: 15px; }
     a { color: #175cd3; }
-    nav { display: flex; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
-    nav a { color: #dbeafe; text-decoration: none; font-size: 14px; }
+    nav { display: flex; gap: 18px; margin-top: 12px; flex-wrap: wrap; }
+    nav a { color: #fff; text-decoration: none; font-size: 17px; font-weight: 700; }
+    nav a:hover { text-decoration: underline; }
     form { margin: 0; }
     label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; color: #4b5870; }
     input, select, textarea { box-sizing: border-box; width: 100%; padding: 8px 10px; border: 1px solid #b7c2d1; border-radius: 6px; font-size: 14px; line-height: 20px; background: #fff; }
@@ -106,6 +107,63 @@ function renderAdminShell({ title, token, message, adminEmail, content }) {
       .search-form label { flex: 1 1 auto; width: auto; }
     }
   </style>
+  <script>
+    async function submitAdminForm(form, submitter) {
+      const method = String(form.method || "get").toLowerCase();
+      if (method !== "post") return false;
+
+      const formData = new FormData(form);
+      if (submitter?.name) formData.set(submitter.name, submitter.value || "");
+      const previousText = submitter?.textContent;
+      if (submitter) {
+        submitter.disabled = true;
+        submitter.textContent = "处理中";
+      }
+
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "accept": "text/html",
+          },
+          body: new URLSearchParams(formData),
+          credentials: "same-origin",
+        });
+        const html = await response.text();
+        const next = new DOMParser().parseFromString(html, "text/html");
+        if (!response.ok || !next.body) throw new Error("请求失败");
+        document.title = next.title || document.title;
+        document.body.replaceWith(next.body);
+        const nextUrl = new URL(response.url);
+        window.history.replaceState({}, "", nextUrl);
+        if (nextUrl.hash) document.querySelector(nextUrl.hash)?.scrollIntoView();
+      } catch (error) {
+        if (submitter?.name && !form.querySelector('input[name="' + submitter.name + '"][type="hidden"]')) {
+          const hidden = document.createElement("input");
+          hidden.type = "hidden";
+          hidden.name = submitter.name;
+          hidden.value = submitter.value || "";
+          form.appendChild(hidden);
+        }
+        form.submit();
+      } finally {
+        if (submitter && document.contains(submitter)) {
+          submitter.disabled = false;
+          submitter.textContent = previousText;
+        }
+      }
+      return true;
+    }
+
+    document.addEventListener("submit", async (event) => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement)) return;
+      if (String(form.method || "get").toLowerCase() !== "post") return;
+      event.preventDefault();
+      await submitAdminForm(form, event.submitter);
+    });
+  </script>
 </head>
 <body>
   <header>

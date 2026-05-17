@@ -1607,6 +1607,9 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
     h1 { margin: 0; font-size: 22px; }
     h2 { font-size: 18px; margin: 24px 0 12px; }
     form { margin: 0; }
+    .admin-nav { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; }
+    .admin-nav a { color: #fff; font-size: 17px; font-weight: 700; text-decoration: none; }
+    .admin-nav a:hover { text-decoration: underline; }
     .panel, .user { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; margin-bottom: 10px; }
     .panel { padding: 16px; }
     .recharge-panel { scroll-margin-top: 14px; }
@@ -1663,6 +1666,7 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
     .check { display: inline-flex; flex-direction: row; align-items: center; gap: 8px; min-height: 38px; color: #4b5870; }
     .check input { width: 16px; }
     .meta { color: #536078; font-size: 13px; margin: 10px 0 0; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     .message { background: #ecfdf3; border: 1px solid #abefc6; color: #067647; padding: 10px 12px; border-radius: 6px; margin-bottom: 14px; }
     .message.error { background: #fff1f0; border-color: #ffccc7; color: #a8071a; margin-top: 14px; }
     .history-list, .conversation-list { display: grid; gap: 8px; margin-top: 10px; }
@@ -1681,12 +1685,116 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
       main { padding: 14px; }
     }
   </style>
+  <script>
+    window.adminExpiryBaseDate = "${escapeHtml(getBangkokDateString())}";
+
+    function formatBangkokDate(date) {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "${BILLING_TIME_ZONE}",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).formatToParts(date);
+      const year = parts.find((part) => part.type === "year")?.value || "";
+      const month = parts.find((part) => part.type === "month")?.value || "";
+      const day = parts.find((part) => part.type === "day")?.value || "";
+      return year && month && day ? year + "-" + month + "-" + day : "";
+    }
+
+    function addMonthsToExpiryDate(dateString, months) {
+      const base = new Date(dateString + "T12:00:00+07:00");
+      const originalDay = base.getDate();
+      const next = new Date(base);
+      next.setMonth(next.getMonth() + Number.parseInt(months || "12", 10));
+      if (next.getDate() !== originalDay) next.setDate(0);
+      return formatBangkokDate(next);
+    }
+
+    async function submitAdminForm(form, submitter) {
+      const method = String(form.method || "get").toLowerCase();
+      if (method !== "post") return false;
+
+      const formData = new FormData(form);
+      if (submitter?.name) formData.set(submitter.name, submitter.value || "");
+      const previousText = submitter?.textContent;
+      if (submitter) {
+        submitter.disabled = true;
+        submitter.textContent = "处理中";
+      }
+
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "accept": "text/html",
+          },
+          body: new URLSearchParams(formData),
+          credentials: "same-origin",
+        });
+        const html = await response.text();
+        const next = new DOMParser().parseFromString(html, "text/html");
+        if (!response.ok || !next.body) throw new Error("请求失败");
+        document.title = next.title || document.title;
+        document.body.replaceWith(next.body);
+        const nextUrl = new URL(response.url);
+        window.history.replaceState({}, "", nextUrl);
+        if (nextUrl.hash) document.querySelector(nextUrl.hash)?.scrollIntoView();
+      } catch (error) {
+        if (submitter?.name && !form.querySelector('input[name="' + submitter.name + '"][type="hidden"]')) {
+          const hidden = document.createElement("input");
+          hidden.type = "hidden";
+          hidden.name = submitter.name;
+          hidden.value = submitter.value || "";
+          form.appendChild(hidden);
+        }
+        form.submit();
+      } finally {
+        if (submitter && document.contains(submitter)) {
+          submitter.disabled = false;
+          submitter.textContent = previousText;
+        }
+      }
+      return true;
+    }
+
+    document.addEventListener("submit", async (event) => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement)) return;
+      if (String(form.method || "get").toLowerCase() !== "post") return;
+      event.preventDefault();
+      await submitAdminForm(form, event.submitter);
+    });
+
+    document.addEventListener("change", (event) => {
+      const select = event.target;
+      if (!(select instanceof HTMLSelectElement) || !select.matches("[data-expiry-months]")) return;
+      const target = document.getElementById(select.dataset.expiryTarget || "");
+      if (!select.value || !target) return;
+      target.value = addMonthsToExpiryDate(window.adminExpiryBaseDate, select.value);
+    });
+
+    document.addEventListener("click", (event) => {
+      const input = event.target;
+      if (input instanceof HTMLInputElement && input.type === "date" && typeof input.showPicker === "function") input.showPicker();
+    });
+
+    document.addEventListener("focusin", (event) => {
+      const input = event.target;
+      if (input instanceof HTMLInputElement && input.type === "date" && typeof input.showPicker === "function") input.showPicker();
+    });
+  </script>
 </head>
 <body>
   <header>
     <h1>linebot-Glossary 管理</h1>
     <p class="meta">当前管理员：${escapeHtml(adminEmail || "unknown")} · <a href="/admin/logout">退出</a></p>
-    <p class="meta"><a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}">用户管理</a> · <a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}#conversations">群聊绑定</a> · <a href="/admin/suggestions${token ? `?token=${encodeURIComponent(token)}` : ""}">候选词</a> · <a href="/admin/glossary${token ? `?token=${encodeURIComponent(token)}` : ""}">术语库</a></p>
+    <nav class="admin-nav" aria-label="后台导航">
+      <a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}">用户管理</a>
+      <a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}#conversations">群聊绑定</a>
+      <a href="/admin/suggestions${token ? `?token=${encodeURIComponent(token)}` : ""}">候选词</a>
+      <a href="/admin/glossary${token ? `?token=${encodeURIComponent(token)}` : ""}">术语库</a>
+    </nav>
   </header>
   <main>
     ${message ? `<div class="message">${escapeHtml(message)}</div>` : ""}
@@ -1729,7 +1837,7 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         ${renewUserId ? `<input type="hidden" name="renew_userid" value="${escapeHtml(renewUserId)}">` : ""}
         ${conversationSearchTerm ? `<input type="hidden" name="conversation_search" value="${escapeHtml(conversationSearchTerm)}">` : ""}
-        <label>搜索用户<input name="search" value="${escapeHtml(searchTerm || "")}" placeholder="USERID / 用户名 / 备注"></label>
+        <label><span class="sr-only">搜索用户</span><input name="search" value="${escapeHtml(searchTerm || "")}" placeholder="USERID / 用户名 / 备注"></label>
         <button type="submit" class="secondary">搜索</button>
       </form>
     </div>
@@ -1747,47 +1855,6 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
       ${renderConversationRows(conversationBindings, token)}
     </section>
   </main>
-  <script>
-    const expiryBaseDate = "${escapeHtml(getBangkokDateString())}";
-
-    function formatBangkokDate(date) {
-      const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "${BILLING_TIME_ZONE}",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).formatToParts(date);
-      const year = parts.find((part) => part.type === "year")?.value || "";
-      const month = parts.find((part) => part.type === "month")?.value || "";
-      const day = parts.find((part) => part.type === "day")?.value || "";
-      return year && month && day ? year + "-" + month + "-" + day : "";
-    }
-
-    function addMonthsToExpiryDate(dateString, months) {
-      const base = new Date(dateString + "T12:00:00+07:00");
-      const originalDay = base.getDate();
-      const next = new Date(base);
-      next.setMonth(next.getMonth() + Number.parseInt(months || "12", 10));
-      if (next.getDate() !== originalDay) next.setDate(0);
-      return formatBangkokDate(next);
-    }
-
-    document.querySelectorAll("[data-expiry-months]").forEach((select) => {
-      select.addEventListener("change", () => {
-        const target = document.getElementById(select.dataset.expiryTarget || "");
-        if (!select.value) return;
-        if (target) target.value = addMonthsToExpiryDate(expiryBaseDate, select.value);
-      });
-    });
-
-    document.querySelectorAll('input[type="date"]').forEach((input) => {
-      const openPicker = () => {
-        if (typeof input.showPicker === "function") input.showPicker();
-      };
-      input.addEventListener("click", openPicker);
-      input.addEventListener("focus", openPicker);
-    });
-  </script>
 </body>
 </html>`;
 }
