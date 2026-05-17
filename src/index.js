@@ -9,7 +9,7 @@ const crypto = require("crypto");
 const { Translate } = require("@google-cloud/translate").v2;
 const { supabase } = require("./db");
 const { registerAdminGlossaryRoutes } = require("./adminGlossary");
-const { applyGlossaryTermsToTranslation, findFrequentTranslation, recordMessageAnalysis } = require("./glossary");
+const { applyGlossaryTermsToTranslation, recordMessageAnalysis } = require("./glossary");
 
 const PORT = process.env.PORT || 8080;
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
@@ -1792,7 +1792,6 @@ function renderAdminPage({ users, conversationBindings, renewUser, renewUserId, 
     <nav class="admin-nav" aria-label="后台导航">
       <a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}">用户管理</a>
       <a href="/admin${token ? `?token=${encodeURIComponent(token)}` : ""}#conversations">群聊绑定</a>
-      <a href="/admin/frequent-translations${token ? `?token=${encodeURIComponent(token)}` : ""}">高频直译</a>
       <a href="/admin/suggestions${token ? `?token=${encodeURIComponent(token)}` : ""}">候选词</a>
       <a href="/admin/glossary${token ? `?token=${encodeURIComponent(token)}` : ""}">术语库</a>
     </nav>
@@ -3094,11 +3093,6 @@ async function buildDirectedMessages(text, sourceLang, targetLang) {
   const normalizedSource = normalizeCode(sourceLang);
   const normalizedTarget = normalizeCode(targetLang);
   if (normalizedSource === normalizedTarget) return [];
-
-  const frequentTranslation = await findFrequentTranslation(text, normalizedSource, normalizedTarget);
-  if (frequentTranslation) {
-    return [{ type: "text", text: buildTranslationLine(normalizedTarget, frequentTranslation) }];
-  }
 
   const translated = await callTranslate(text, normalizedTarget, normalizedSource);
   if (!translated || translated.trim() === text) return [];

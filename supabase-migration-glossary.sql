@@ -59,38 +59,6 @@ create table if not exists public.term_suggestions (
   unique (normalized_text, language, status)
 );
 
-create table if not exists public.sentence_candidates (
-  id uuid primary key default gen_random_uuid(),
-  source_text text not null,
-  normalized_source_text text not null,
-  source_lang text not null default 'und',
-  count bigint not null default 1 check (count >= 0),
-  examples jsonb not null default '[]'::jsonb,
-  status text not null default 'candidate' check (status in ('candidate', 'ignored', 'promoted')),
-  first_seen_at timestamptz not null default now(),
-  last_seen_at timestamptz not null default now(),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (normalized_source_text, source_lang)
-);
-
-create table if not exists public.frequent_translations (
-  id uuid primary key default gen_random_uuid(),
-  source_text text not null,
-  normalized_source_text text not null,
-  source_lang text not null,
-  target_lang text not null,
-  translated_text text not null,
-  status text not null default 'draft' check (status in ('draft', 'active', 'disabled')),
-  hit_count bigint not null default 0 check (hit_count >= 0),
-  last_hit_at timestamptz,
-  sentence_candidate_id uuid references public.sentence_candidates(id) on delete set null,
-  notes text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (normalized_source_text, source_lang, target_lang)
-);
-
 create index if not exists glossary_terms_status_domain_idx
   on public.glossary_terms (status, domain);
 
@@ -112,15 +80,6 @@ create index if not exists message_terms_domains_gin_idx
 
 create index if not exists term_suggestions_status_count_idx
   on public.term_suggestions (status, count desc, updated_at desc);
-
-create index if not exists sentence_candidates_status_count_idx
-  on public.sentence_candidates (status, count desc, last_seen_at desc);
-
-create index if not exists frequent_translations_lookup_idx
-  on public.frequent_translations (status, source_lang, target_lang, normalized_source_text);
-
-create index if not exists frequent_translations_hit_count_idx
-  on public.frequent_translations (status, hit_count desc, updated_at desc);
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -150,16 +109,6 @@ for each row execute function public.set_updated_at();
 drop trigger if exists term_suggestions_set_updated_at on public.term_suggestions;
 create trigger term_suggestions_set_updated_at
 before update on public.term_suggestions
-for each row execute function public.set_updated_at();
-
-drop trigger if exists sentence_candidates_set_updated_at on public.sentence_candidates;
-create trigger sentence_candidates_set_updated_at
-before update on public.sentence_candidates
-for each row execute function public.set_updated_at();
-
-drop trigger if exists frequent_translations_set_updated_at on public.frequent_translations;
-create trigger frequent_translations_set_updated_at
-before update on public.frequent_translations
 for each row execute function public.set_updated_at();
 
 create or replace function public.record_message_term(
@@ -269,78 +218,6 @@ begin
   returning id into v_suggestion_id;
 
   return v_suggestion_id;
-end;
-$$;
-
-create or replace function public.record_sentence_candidate(
-  p_source_text text,
-  p_normalized_source_text text,
-  p_source_lang text,
-  p_example text default null,
-  p_example_limit integer default 5
-)
-returns table (
-  id uuid,
-  count bigint,
-  status text
-)
-language plpgsql
-security definer
-as $$
-begin
-  return query
-  insert into public.sentence_candidates (
-    source_text,
-    normalized_source_text,
-    source_lang,
-    count,
-    examples,
-    first_seen_at,
-    last_seen_at
-  )
-  values (
-    p_source_text,
-    p_normalized_source_text,
-    coalesce(nullif(p_source_lang, ''), 'und'),
-    1,
-    case
-      when nullif(p_example, '') is null then '[]'::jsonb
-      else jsonb_build_array(left(p_example, 500))
-    end,
-    now(),
-    now()
-  )
-  on conflict (normalized_source_text, source_lang) do update
-  set
-    count = public.sentence_candidates.count + 1,
-    examples = (
-      select coalesce(jsonb_agg(example), '[]'::jsonb)
-      from (
-        select distinct example
-        from jsonb_array_elements_text(coalesce(public.sentence_candidates.examples, '[]'::jsonb) || coalesce(excluded.examples, '[]'::jsonb)) as examples(example)
-        limit greatest(coalesce(p_example_limit, 5), 0)
-      ) kept_examples
-    ),
-    last_seen_at = now(),
-    updated_at = now()
-  returning public.sentence_candidates.id, public.sentence_candidates.count, public.sentence_candidates.status;
-end;
-$$;
-
-create or replace function public.record_frequent_translation_hit(
-  p_translation_id uuid
-)
-returns void
-language plpgsql
-security definer
-as $$
-begin
-  update public.frequent_translations
-  set
-    hit_count = hit_count + 1,
-    last_hit_at = now(),
-    updated_at = now()
-  where id = p_translation_id;
 end;
 $$;
 

@@ -1,9 +1,8 @@
 const { supabase } = require("./db");
-const { analyzeMessage, normalizeText } = require("./messageAnalyzer");
+const { analyzeMessage } = require("./messageAnalyzer");
 
 const MESSAGE_TERM_EXAMPLE_LIMIT = 5;
 const SUGGESTION_MIN_COUNT = 20;
-const SENTENCE_EXAMPLE_LIMIT = 5;
 
 function getJsonLanguageValues(value, language) {
   if (!value || typeof value !== "object") return [];
@@ -124,79 +123,9 @@ async function recordCandidateTerm(candidate, language, domains, example) {
   return row;
 }
 
-function normalizeSentence(value) {
-  return normalizeText(value);
-}
-
-async function findFrequentTranslation(text, sourceLang, targetLang) {
-  const normalizedSourceText = normalizeSentence(text);
-  if (!normalizedSourceText) return null;
-
-  const { data, error } = await supabase
-    .from("frequent_translations")
-    .select("id, translated_text")
-    .eq("status", "active")
-    .eq("source_lang", sourceLang || "und")
-    .eq("target_lang", targetLang || "und")
-    .eq("normalized_source_text", normalizedSourceText)
-    .maybeSingle();
-
-  if (error) {
-    console.warn("Find frequent translation failed:", {
-      error: error.message,
-      sourceLang,
-      targetLang,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-
-  if (!data?.translated_text) return null;
-
-  supabase.rpc("record_frequent_translation_hit", {
-    p_translation_id: data.id,
-  }).then(({ error: hitError }) => {
-    if (hitError) {
-      console.warn("Record frequent translation hit failed:", {
-        error: hitError.message,
-        translationId: data.id,
-        time: new Date().toISOString(),
-      });
-    }
-  });
-
-  return data.translated_text;
-}
-
-async function recordSentenceCandidate(text, sourceLang) {
-  const sourceText = String(text || "").trim();
-  const normalizedSourceText = normalizeSentence(sourceText);
-  if (!sourceText || !normalizedSourceText || normalizedSourceText.length < 2) return null;
-
-  const { data, error } = await supabase.rpc("record_sentence_candidate", {
-    p_source_text: sourceText,
-    p_normalized_source_text: normalizedSourceText,
-    p_source_lang: sourceLang || "und",
-    p_example: sourceText,
-    p_example_limit: SENTENCE_EXAMPLE_LIMIT,
-  });
-
-  if (error) {
-    console.warn("Record sentence candidate failed:", {
-      error: error.message,
-      sourceLang,
-      time: new Date().toISOString(),
-    });
-    return null;
-  }
-
-  return Array.isArray(data) ? data[0] : null;
-}
-
 async function recordMessageAnalysis({ text, language, sourceType, conversationId }) {
-  const sentenceCandidate = await recordSentenceCandidate(text, language);
   const analysis = analyzeMessage(text, language);
-  if (!analysis.candidates.length) return { ...analysis, matches: [], sentenceCandidate };
+  if (!analysis.candidates.length) return { ...analysis, matches: [] };
 
   const matches = await matchGlossaryTerms(text, language);
   const example = String(text || "").slice(0, 500);
@@ -220,15 +149,11 @@ async function recordMessageAnalysis({ text, language, sourceType, conversationI
   return {
     ...analysis,
     matches,
-    sentenceCandidate,
   };
 }
 
 module.exports = {
   applyGlossaryTermsToTranslation,
-  findFrequentTranslation,
   matchGlossaryTerms,
-  normalizeSentence,
   recordMessageAnalysis,
-  recordSentenceCandidate,
 };
